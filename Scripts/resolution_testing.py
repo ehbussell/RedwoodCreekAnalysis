@@ -17,28 +17,28 @@ from . import kernels
 from . import fit_test
 
 
-def main(stages=None, test_resolutions=None):
+def run_resolution_testing(config_dict):
     """Run tests with appropriate stages."""
 
-    if stages is None:
-        stages = ["all"]
+    print("#"*32 + "\n## Running Resolution Testing ##\n" + "#"*32)
 
-    roi = ((-124.1, 40.99), (-123.8, 41.2))
-    eroi = ((-124.2, 40.89), (-123.7, 41.3))
+    roi = config_dict['general_options']['roi_extent']
+    eroi = config_dict['general_options']['eroi_extent']
 
     full_resolution = 250
-    if test_resolutions is None:
-        test_resolutions = [250, 2500]
+    test_resolutions = config_dict['resolution_testing_options']['test_resolutions']
 
-    if "all" in stages or "makeLandscapes" in stages:
+    if config_dict['resolution_testing_options']['make_landscapes']['run']:
         print("\nMaking Landscapes...\n")
         for resolution in test_resolutions:
             # Generate landscape
             landscape_name = "ROI_" + str(resolution) + "Landscape"
-            options = {'plots': False}
+            options = {
+                'plots': config_dict['resolution_testing_options']['make_landscapes']['make_plots']
+            }
             generate_landscapes.generate_landscape(roi, resolution, landscape_name, options)
 
-    if "all" in stages or "makeLikelihoods" in stages:
+    if config_dict['resolution_testing_options']['make_likelihoods']['run']:
         print("\nMaking Likelihoods...\n")
         for resolution in test_resolutions:
             # Make likelihood function
@@ -60,9 +60,20 @@ def main(stages=None, test_resolutions=None):
                                      landscape_name+"_likelihood")
             likelihood_function.save(save_file, identifier=landscape_name)
 
-    if "all" in stages or "fitLandscapes" in stages:
+    if config_dict['resolution_testing_options']['fit_landscapes']['run']:
         print("\nFitting Landscapes...\n")
         # Fit landscapes
+
+        if config_dict['resolution_testing_options']['fit_landscapes']['overwrite_results_file']:
+            all_fit_results = {}
+        else:
+            filename = os.path.join("GeneratedData", "RasterFits", "FitResults.json")
+            try:
+                with open(filename, "r") as fin:
+                    all_fit_results = json.load(fin)
+            except FileNotFoundError:
+                all_fit_results = {}
+
         for resolution in test_resolutions:
             t1 = time.time()
             landscape_name = "ROI_" + str(resolution) + "Landscape"
@@ -101,17 +112,27 @@ def main(stages=None, test_resolutions=None):
                 )
 
                 opt_params['Raw_Output'] = fit_output.__repr__()
-                outfile = os.path.join(
-                    "GeneratedData", "RasterFits", landscape_name + name + "Fit.json")
-                with open(outfile, "w") as f_out:
-                    json.dump(opt_params, f_out, indent=4)
 
-                plot_likelihood(landscape_name, name, gen, opt_params, lik_loaded)
+                # Save results
+                if landscape_name in all_fit_results:
+                    all_fit_results[landscape_name][name] = opt_params
+                else:
+                    all_fit_results[landscape_name] = {
+                        name: opt_params
+                    }
+
+                outfile = os.path.join(
+                    "GeneratedData", "RasterFits", "FitResults.json")
+                with open(outfile, "w") as f_out:
+                    json.dump(all_fit_results, f_out, indent=4)
+
+                if config_dict['resolution_testing_options']['fit_landscapes']['make_plots']:
+                    plot_likelihood(landscape_name, name, gen, opt_params, lik_loaded)
 
             t2 = time.time()
             print("Time taken: {0}s".format(t2-t1))
 
-    if "all" in stages or "testFits" in stages:
+    if config_dict['resolution_testing_options']['test_fits']['run']:
         print("\nTesting Fits...\n")
         # Make and assess raster models
         all_budgets = []
@@ -145,6 +166,10 @@ def main(stages=None, test_resolutions=None):
                     idx += 1
 
         sim_land_dpcs = np.sum(sim_dpcs, axis=2)
+
+        infile = os.path.join("GeneratedData", "RasterFits", "FitResults.json")
+        with open(infile, "r") as fin:
+            all_fit_results = json.load(fin)
 
         for resolution in test_resolutions:
             # Setup fit testing structure for this landscape
@@ -192,10 +217,7 @@ def main(stages=None, test_resolutions=None):
             for kernel_name, kernel_gen in zip(kernel_names, kernel_generators):
 
                 # Read parameter values
-                infile = os.path.join(
-                    "GeneratedData", "RasterFits", landscape_name + kernel_name+"Fit.json")
-                with open(infile, "r") as f_in:
-                    opt_params = json.load(f_in)
+                opt_params = all_fit_results[landscape_name][kernel_name]
                 opt_params.pop("Raw_Output", None)
 
                 print(opt_params)
