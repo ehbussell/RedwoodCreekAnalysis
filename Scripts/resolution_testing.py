@@ -2,11 +2,13 @@
 
 import os
 import time
+import pickle
 import json
 import pdb
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
+from datetime import timedelta
 
 from IndividualSimulator.utilities import output_data
 from RasterModel import raster_model_fitting
@@ -28,8 +30,11 @@ def run_resolution_testing(config_dict):
     full_resolution = 250
     test_resolutions = config_dict['resolution_testing_options']['test_resolutions']
 
+    run_stats = {}
+
     if config_dict['resolution_testing_options']['make_landscapes']['run']:
         print("\nMaking Landscapes...\n")
+        time1 = time.time()
         for resolution in test_resolutions:
             # Generate landscape
             landscape_name = "ROI_" + str(resolution) + "Landscape"
@@ -37,9 +42,13 @@ def run_resolution_testing(config_dict):
                 'plots': config_dict['resolution_testing_options']['make_landscapes']['make_plots']
             }
             generate_landscapes.generate_landscape(roi, resolution, landscape_name, options)
+        
+        time2 = time.time()
+        run_stats["Make_Landscapes_Time"] = str(timedelta(seconds=time2-time1))
 
     if config_dict['resolution_testing_options']['make_likelihoods']['run']:
         print("\nMaking Likelihoods...\n")
+        time1 = time.time()
         for resolution in test_resolutions:
             # Make likelihood function
             landscape_name = "ROI_" + str(resolution) + "Landscape"
@@ -60,9 +69,12 @@ def run_resolution_testing(config_dict):
                                      landscape_name+"_likelihood")
             likelihood_function.save(save_file, identifier=landscape_name)
 
+        time2 = time.time()
+        run_stats["Make_Likelihoods_Time"] = str(timedelta(seconds=time2-time1))
+
     if config_dict['resolution_testing_options']['fit_landscapes']['run']:
         print("\nFitting Landscapes...\n")
-        # Fit landscapes
+        time1 = time.time()
 
         if config_dict['resolution_testing_options']['fit_landscapes']['overwrite_results_file']:
             all_fit_results = {}
@@ -79,37 +91,52 @@ def run_resolution_testing(config_dict):
             landscape_name = "ROI_" + str(resolution) + "Landscape"
             raster_header = raster_tools.RasterData.from_file(
                 os.path.join("GeneratedData", landscape_name, "HostNumbers.txt")).header_vals
-            # Fit raster model
-            kernel_names = ["Exponential", "ExpPower", "Cauchy"]
-            kernel_generators = [kernels.make_exponential_kernel,
-                                 kernels.make_exp_power_kernel,
-                                 kernels.make_cauchy_kernel]
-            kernel_jac_generators = [kernels.make_exponential_jac,
-                                     kernels.make_exp_power_jac,
-                                     kernels.make_cauchy_jac]
-            if resolution > 500:
-                kernel_priors = [[("beta", (0, 0.01)), ("scale", (0, 2.5))],
-                                 [("beta", (0, 0.01)), ("power", (0, 1.0)), ("scale", (0, 2.5))],
-                                 [("beta", (0, 0.01)), ("scale", (0, 2.5))]]
-            else:
-                kernel_priors = [[("beta", (0, 0.01)), ("scale", (0, 2.5))],
-                                 [("beta", (0, 0.01)), ("power", (0, 1.2)), ("scale", (0, 0.25))],
-                                 [("beta", (0, 0.01)), ("scale", (0, 2.5))]]
+
+            kernel_names = config_dict['resolution_testing_options']['kernel_names']
+            kernel_priors = [{} for _ in kernel_names]
+            param_start = [{} for _ in kernel_names]
+            for i, kernel in enumerate(kernel_names):
+                params = config_dict['resolution_testing_options']['kernel_priors'][i].keys()
+                for param in params:
+                    kernel_priors[i][param] = config_dict['resolution_testing_options'][
+                        'kernel_priors'][i][param]
+                    param_start[i][param] = config_dict['resolution_testing_options'][
+                        'kernel_init'][i][param]
+                    if param == "scale":
+                        kernel_priors[i][param] = np.array(kernel_priors[i][param]) / resolution
+                        param_start[i][param] = np.array(param_start[i][param]) / resolution
+            kernel_generators = []
+            kernel_jac_generators = []
+            for name in kernel_names:
+                if name == "Exponential":
+                    kernel_generators.append(kernels.make_exponential_kernel)
+                    kernel_jac_generators.append(kernels.make_exponential_jac)
+                elif name == "Cauchy":
+                    kernel_generators.append(kernels.make_cauchy_kernel)
+                    kernel_jac_generators.append(kernels.make_cauchy_jac)
+                elif name == "ExpPower":
+                    kernel_generators.append(kernels.make_exp_power_kernel)
+                    kernel_jac_generators.append(kernels.make_exp_power_jac)
+                else:
+                    raise ValueError("Unknown kernel name!")
 
             save_file = os.path.join("GeneratedData", "SimulationRuns",
                                      landscape_name+"_likelihood.npz")
             lik_loaded = raster_model_fitting.LikelihoodFunction.from_file(save_file)
 
             zipped_values = zip(kernel_names, kernel_generators, kernel_jac_generators,
-                                kernel_priors)
+                                kernel_priors, param_start)
 
-            for name, gen, jac, prior in zipped_values:
+            for name, gen, jac, prior, start in zipped_values:
 
                 opt_params, fit_output = raster_model_fitting.fit_raster_MLE(
                     data_stub=os.path.join("GeneratedData", "SimulationRuns", "output"),
-                    kernel_generator=gen, kernel_params=prior, target_raster=raster_header,
-                    nsims=None, likelihood_func=lik_loaded, kernel_jac=jac, raw_output=True
+                    kernel_generator=gen, kernel_params=prior, param_start=start,
+                    target_raster=raster_header, nsims=None, likelihood_func=lik_loaded,
+                    kernel_jac=jac, raw_output=True
                 )
+
+                print("Complete. {0}, {1} kernel: {2}".format(landscape_name, name, opt_params))
 
                 opt_params['Raw_Output'] = fit_output.__repr__()
 
@@ -127,13 +154,20 @@ def run_resolution_testing(config_dict):
                     json.dump(all_fit_results, f_out, indent=4)
 
                 if config_dict['resolution_testing_options']['fit_landscapes']['make_plots']:
-                    plot_likelihood(landscape_name, name, gen, opt_params, lik_loaded)
+                    plot_likelihood(landscape_name, name, gen, opt_params, lik_loaded, config_dict,
+                                    prior)
 
             t2 = time.time()
-            print("Time taken: {0}s".format(t2-t1))
+            time_taken = timedelta(seconds=t2-t1)
+            print("Landscape ROI_" + str(resolution) +
+                  " Fitted. Time taken: {0}s".format(str(time_taken)))
+
+        time2 = time.time()
+        run_stats["Fit_Landscapes_Time"] = str(timedelta(seconds=time2-time1))
 
     if config_dict['resolution_testing_options']['test_fits']['run']:
         print("\nTesting Fits...\n")
+        time1 = time.time()
         # Make and assess raster models
         all_budgets = []
 
@@ -209,10 +243,17 @@ def run_resolution_testing(config_dict):
             tested_fit = fit_test.TestedFit(
                 landscape_name, base_raster, run_raster, all_sim_data, test_times)
 
-            kernel_names = ["Exponential", "ExpPower", "Cauchy"]
-            kernel_generators = [kernels.make_exponential_kernel,
-                                 kernels.make_exp_power_kernel,
-                                 kernels.make_cauchy_kernel]
+            kernel_names = config_dict['resolution_testing_options']['kernel_names']
+            kernel_generators = []
+            for name in kernel_names:
+                if name == "Exponential":
+                    kernel_generators.append(kernels.make_exponential_kernel)
+                elif name == "Cauchy":
+                    kernel_generators.append(kernels.make_cauchy_kernel)
+                elif name == "ExpPower":
+                    kernel_generators.append(kernels.make_exp_power_kernel)
+                else:
+                    raise ValueError("Unknown kernel name!")
 
             for kernel_name, kernel_gen in zip(kernel_names, kernel_generators):
 
@@ -222,7 +263,7 @@ def run_resolution_testing(config_dict):
 
                 print(opt_params)
 
-                coupling = np.full((ncells_agg, ncells_agg), 1.0)
+                coupling = np.ones((ncells_agg, ncells_agg))
                 kernel = kernel_gen(**opt_params)
 
                 control_rate = 0.005
@@ -262,8 +303,7 @@ def run_resolution_testing(config_dict):
                 def control_policy(t):
                     return [0]*ncells_agg
 
-                no_control_tmp = approx_model.run_scheme(control_policy)
-                no_control_tmp.plot()
+                no_control_tmp = approx_model.run_scheme(approx_model.no_control_policy)
                 no_control_results = {}
                 for cell in range(ncells_agg):
                     s_vals = no_control_tmp.results_s["Cell" + str(cell)].values
@@ -280,66 +320,186 @@ def run_resolution_testing(config_dict):
                 tested_fit.save(os.path.join(
                     "GeneratedData", "RasterFits", landscape_name+"FitTest"))
 
-                # # Calculate quality metrics with control
-                # for budget in all_budgets:
-                #     # Run policy (with control, prioritised by N->S, E->W)
-                #     # Aggregate or divide data
-                #     # Calculate quality metric
-                #     pass
+                # Calculate quality metrics with control
+                for budget in all_budgets:
+                    # Run policy (with control, prioritised by N->S, E->W)
+                    # Aggregate or divide data
+                    # Calculate quality metric
+                    pass
 
-            # Make plots assessing fit quality
+        time2 = time.time()
+        run_stats["Fit_Landscapes_Time"] = str(timedelta(seconds=time2-time1))
+
+    if config_dict['resolution_testing_options']['plot_fits']['run']:
+        # Make plots assessing fit quality
+
+        # Combine data
+        metric_scales = ["Divided", "Normal", "Landscape"]
+        all_data = {kernel: {metric: [] for metric in metric_scales} for kernel in kernel_names}
+        for resolution in test_resolutions:
+            nhosts = int(100 * np.power(resolution / full_resolution, 2))
+            landscape_name = "ROI_" + str(resolution) + "Landscape"
+            tested_fit = pickle.load(os.path.join(
+                "GeneratedData", "RasterFits", landscape_name+"FitTest"))
+            for kernel in kernel_names:
+                all_data[kernel]["Divided"].append(
+                    tested_fit.metric_data[kernel]["Divided"] / nhosts)
+                all_data[kernel]["Normal"].append(
+                    tested_fit.metric_data[kernel]["Normal"] / nhosts)
+                all_data[kernel]["Landscape"].append(
+                    tested_fit.metric_data[kernel]["Landscape"] / nhosts)
+
+        # Make plots for each kernel
+        for kernel in kernel_names:
+            fig = plt.figure()
+            ax = fig.add_subplot(111)
+            for metric in metric_scales:
+                ax.plot(test_resolutions, all_data[kernel][metric], label=metric)
+            ax.legend()
+            ax.set_title(kernel + " Kernel")
+            ax.set_xlabel("Resolution / m")
+            ax.set_ylabel("RMSE as Proportion of Cell")
+            fig.savefig(os.path.join("Figures", "ResolutionTesting_" + kernel + ".png"))
+
+        # Make plots for each metric
+        for metric in metric_scales:
+            fig = plt.figure()
+            ax = fig.add_subplot(111)
+            for kernel in kernel_names:
+                ax.plot(test_resolutions, all_data[kernel][metric], label=kernel)
+            ax.legend()
+            ax.set_title(metric + " Metric")
+            ax.set_xlabel("Resolution / m")
+            ax.set_ylabel("RMSE as Proportion of Cell")
+            fig.savefig(os.path.join("Figures", "ResolutionTesting_" + metric + ".png"))
 
 
-def plot_likelihood(landscape_name, name, gen, opt_params, lik_loaded):
-    opt_params.pop("Raw_Output")
+    return run_stats
+
+
+def plot_likelihood(landscape_name, name, gen, opt_params, lik_loaded, config_dict, prior):
+    recalc_plot_vals = config_dict[
+        'resolution_testing_options']['fit_landscapes']['recalculate_plot_values']
 
     all_params = {}
     param_names = []
     for param, value in opt_params.items():
-        all_params[param] = np.linspace(0, 3*value, 100)
+        if param == "Raw_Output":
+            continue
+        elif param == "beta":
+            all_params[param] = np.logspace(-8, np.log10(prior[param][1]), 100)
+        else:
+            all_params[param] = np.linspace(*prior[param], 100)
         param_names.append(param)
+    param_names.sort()
 
     if len(param_names) == 2:
-        all_meshed = np.meshgrid(*[all_params[param] for param in param_names])
+        if recalc_plot_vals:
 
-        loglik = np.zeros_like(all_meshed[0])
-        for i in range(all_meshed[0].shape[0]):
-            for j in range(all_meshed[0].shape[1]):
-                param_values = {param: all_meshed[k][i, j] for k, param in enumerate(param_names)}
-                loglik[i, j] = lik_loaded.eval_loglik(gen(**param_values))[0]
+            all_meshed = np.meshgrid(*[all_params[param] for param in param_names])
+
+            loglik = np.zeros_like(all_meshed[0])
+            for i in range(all_meshed[0].shape[0]):
+                for j in range(all_meshed[0].shape[1]):
+                    param_values = {param: all_meshed[k][i, j] for k, param in enumerate(param_names)}
+                    loglik[i, j] = lik_loaded.eval_loglik(gen(**param_values))[0]
+
+            filename = os.path.join("GeneratedData", "RasterFits",
+                                    landscape_name + name + "LikMapValues") 
+            np.savez(filename, loglik=loglik,
+                     **{param: all_meshed[k] for k, param in enumerate(param_names)})
+        
+        else:
+            filename = os.path.join("GeneratedData", "RasterFits",
+                                    landscape_name + name + "LikMapValues.npz") 
+            value_dict = np.load(filename)
+            loglik = value_dict['loglik']
+            all_meshed = [value_dict[param] for param in param_names]
+
+        cmap, cnorm = _map_loglik(loglik, config_dict)
 
         fig = plt.figure()
         ax = fig.add_subplot(111)
-        mesh = ax.pcolormesh(*all_meshed, loglik, norm=mpl.colors.SymLogNorm(10))
+        mesh = ax.pcolormesh(*all_meshed, loglik, cmap=cmap, norm=cnorm)
         ax.plot(*[opt_params[param] for param in param_names], "x")
         ax.set_xlabel(param_names[0])
         ax.set_ylabel(param_names[1])
-        fig.colorbar(mesh)
+        if param_names[0] == "beta":
+            ax.set_xscale("log")
+        elif param_names[1] == "beta":
+            ax.set_yscale("log")
+        fig.colorbar(mesh, ax=ax)
         fig.savefig(os.path.join("Figures", landscape_name + name + "LikMap.png"))
 
     if len(param_names) == 3:
         for fixed_param_name in param_names:
             unfixed_param_names = [x for x in param_names if x != fixed_param_name]
 
-            all_meshed = np.meshgrid(*[all_params[param] for param in unfixed_param_names])
+            if recalc_plot_vals:
+                all_meshed = np.meshgrid(*[all_params[param] for param in unfixed_param_names])
 
-            loglik = np.zeros_like(all_meshed[0])
-            for i in range(all_meshed[0].shape[0]):
-                for j in range(all_meshed[0].shape[1]):
-                    param_values = {param: all_meshed[k][i, j]
-                                    for k, param in enumerate(unfixed_param_names)}
-                    param_values[fixed_param_name] = opt_params[fixed_param_name]
-                    loglik[i, j] = lik_loaded.eval_loglik(gen(**param_values))[0]
+                loglik = np.zeros_like(all_meshed[0])
+                for i in range(all_meshed[0].shape[0]):
+                    for j in range(all_meshed[0].shape[1]):
+                        param_values = {param: all_meshed[k][i, j]
+                                        for k, param in enumerate(unfixed_param_names)}
+                        param_values[fixed_param_name] = opt_params[fixed_param_name]
+                        loglik[i, j] = lik_loaded.eval_loglik(gen(**param_values))[0]
+
+                filename = os.path.join("GeneratedData", "RasterFits", landscape_name + name +
+                                        "LikMap_" + fixed_param_name + "Values")
+                np.savez(filename, loglik=loglik,
+                         **{param: all_meshed[k] for k, param in enumerate(unfixed_param_names)})
+
+            else:
+                filename = os.path.join("GeneratedData", "RasterFits", landscape_name + name +
+                                        "LikMap_" + fixed_param_name + "Values.npz")
+                value_dict = np.load(filename)
+                loglik = value_dict['loglik']
+                all_meshed = [value_dict[param] for param in unfixed_param_names]
+
+            cmap, cnorm = _map_loglik(loglik, config_dict)
 
             fig = plt.figure()
             ax = fig.add_subplot(111)
-            mesh = ax.pcolormesh(*all_meshed, loglik, norm=mpl.colors.SymLogNorm(10))
+            mesh = ax.pcolormesh(*all_meshed, loglik, cmap=cmap, norm=cnorm)
             ax.plot(*[opt_params[param] for param in unfixed_param_names], "x")
             ax.set_xlabel(unfixed_param_names[0])
             ax.set_ylabel(unfixed_param_names[1])
-            fig.colorbar(mesh)
+            if unfixed_param_names[0] == "beta":
+                ax.set_xscale("log")
+            elif unfixed_param_names[1] == "beta":
+                ax.set_yscale("log")
+            fig.colorbar(mesh, ax=ax)
             fig.savefig(os.path.join(
                 "Figures", landscape_name + name + "LikMap_" + fixed_param_name + ".png"))
+
+
+def _map_loglik(loglik, config_dict):
+
+    loglik = np.ma.masked_invalid(loglik)
+
+    vmin = np.min(loglik)
+    vmax = np.max(loglik)
+    print(vmin, vmax)
+    linthresh = config_dict['resolution_testing_options']['fit_landscapes']['plot_linthresh']
+    linscale = ((np.log10(np.abs(vmax)) - np.log10(linthresh)) +
+                (np.log10(np.abs(vmin)) - np.log10(linthresh))) / 18
+    
+    norm = mpl.colors.SymLogNorm(linthresh=linthresh, linscale=linscale, vmin=vmin, vmax=vmax)
+    thresh_neg = norm(-linthresh)
+    thresh_pos = norm(linthresh)
+
+    colors1 = plt.cm.get_cmap("RdBu_r")(np.linspace(0, 0.5, 128))
+    colors1 = list(zip(np.linspace(0, thresh_neg, 128), colors1))
+    colors2 = plt.cm.get_cmap("RdBu_r")(np.linspace(0.5, 1, 128))
+    colors2 = list(zip(np.linspace(thresh_pos, 1.0, 128), colors2))
+    colors1 += [(thresh_neg, plt.cm.get_cmap("RdBu_r")(0.5)),
+                (thresh_pos, plt.cm.get_cmap("RdBu_r")(0.5))]
+    colors1 += colors2
+    cmap = mpl.colors.LinearSegmentedColormap.from_list('mycmap', colors1)
+
+    return cmap, norm
 
 
 def calculate_metric(tested_fit, run_data, run_raster_header, base_raster_header, kernel_name,
@@ -377,7 +537,7 @@ def calculate_metric(tested_fit, run_data, run_raster_header, base_raster_header
     else:
         raise ValueError("Metric not recognised!")
 
-    tested_fit.add_kernel(kernel_name, all_run_data, cell_data, metric_vals)
+    # tested_fit.add_kernel(kernel_name, all_run_data, cell_data, metric_vals)
 
     return metric_vals
 

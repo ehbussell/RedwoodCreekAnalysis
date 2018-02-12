@@ -16,6 +16,7 @@ import raster_tools
 from Scripts import generate_landscapes
 from Scripts import kernels
 from Scripts import resolution_testing
+from Scripts import generate_kernel
 from RasterModel import raster_model_fitting
 from RasterModel import raster_model
 
@@ -29,6 +30,9 @@ default_config = OrderedDict([
 
     ("main_analysis_options", OrderedDict([
         ("generate_landscapes", OrderedDict([
+            ("run", True)
+        ])),
+        ("generate_kernel", OrderedDict([
             ("run", True)
         ])),
         ("run_simulations", OrderedDict([
@@ -46,7 +50,18 @@ default_config = OrderedDict([
     ])),
 
     ("resolution_testing_options", OrderedDict([
-        ("test_resolutions", [250, 2500]),
+        ("test_resolutions", [2500, 2000, 1500, 1000, 500, 250]),
+        ("kernel_names", ["Exponential", "Cauchy", "ExpPower"]),
+        ("kernel_priors", [
+            {"beta": (0, 0.01), "scale": (0, 20000)},
+            {"beta": (0, 0.01), "scale": (0, 20000)},
+            {"beta": (0, 0.01), "power": (0, 2.0), "scale": (0, 20000)}
+        ]),
+        ("kernel_init", [
+            {"beta": 0.005, "scale": 250},
+            {"beta": 0.005, "scale": 250},
+            {"beta": 0.005, "power": 0.6, "scale": 250}
+        ]),
         ("make_landscapes", OrderedDict([
             ("run", True),
             ("make_plots", False)
@@ -58,9 +73,14 @@ default_config = OrderedDict([
         ("fit_landscapes", OrderedDict([
             ("run", True),
             ("make_plots", False),
+            ("recalculate_plot_values", True),
+            ("plot_linthresh", 1.0e6),
             ("overwrite_results_file", True)
         ])),
         ("test_fits", OrderedDict([
+            ("run", True)
+        ])),
+        ("plot_fits", OrderedDict([
             ("run", True)
         ]))
 
@@ -86,7 +106,11 @@ def run_main_analysis(config_dict):
         options = {'map_highlight_region': roi, 'map_detail': "f"}
         generate_landscapes.generate_landscape(eroi, full_resolution, eroi_name, options)
         options['map_highlight_region'] = None
-        generate_landscapes.generate_landscape(roi, reduced_resolution, roi_name, options)
+        # generate_landscapes.generate_landscape(roi, reduced_resolution, roi_name, options)
+    
+    # Kernel generation stage
+    if config_dict['main_analysis_options']['generate_kernel']['run']:
+        generate_kernel.generate_kernel()
 
     # Simulation running stage
     if config_dict['main_analysis_options']['run_simulations']['run']:
@@ -255,4 +279,5 @@ if __name__ == "__main__":
             run_main_analysis(config_dict)
 
         if config_dict['general_options']['run_resolution_testing']:
-            resolution_testing.run_resolution_testing(config_dict)
+            res_stats = resolution_testing.run_resolution_testing(config_dict)
+            print(res_stats)
