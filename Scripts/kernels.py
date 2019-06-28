@@ -8,6 +8,7 @@ def make_exponential_kernel(beta, scale):
     def exponential_kernel(distance):
         """Calculate exponential kernel."""
         return beta * np.exp(-distance / scale) / (2 * np.pi * scale * scale)
+        # return beta * np.exp(-distance / scale)
 
     return exponential_kernel
 
@@ -20,6 +21,10 @@ def make_exponential_jac(beta, scale):
             beta * ((distance/(2*scale)) - 1) * np.exp(-distance / scale) / (
                 np.pi * scale * scale * scale)
         ])
+        # jac = np.array([
+        #         np.exp(-distance / scale),
+        #         beta * (distance/(scale*scale)) * np.exp(-distance / scale)
+        #     ])
 
         return jac
 
@@ -30,6 +35,7 @@ def make_cauchy_kernel(beta, scale):
     def cauchy_kernel(distance):
         """Calculate Cauchy kernel."""
         return 2 * beta / (scale * np.pi * (1 + np.power(distance / scale, 2)))
+        # return beta / (1 + np.power(distance / scale, 2))
 
     return cauchy_kernel
 
@@ -42,6 +48,11 @@ def make_cauchy_jac(beta, scale):
             2 * beta * ((2*distance*distance/(scale*scale + distance*distance)) - 1) / (
                 scale * scale * np.pi * (1 + np.power(distance / scale, 2)))
         ])
+        # jac = np.array([
+        #     1 / (1 + np.power(distance / scale, 2)),
+        #     beta * (2*distance*distance/(scale*scale + distance*distance)) / (
+        #         scale * (1 + np.power(distance / scale, 2)))
+        # ])
 
         return jac
 
@@ -53,6 +64,7 @@ def make_exp_power_kernel(beta, power, scale):
         """Calculate exponential power kernel."""
         return beta * power * np.exp(-np.power(distance / scale, power)) / (
             2 * np.pi * scale * scale * special.gamma(2.0/power))
+        # return beta * np.exp(-np.power(distance / scale, power))
 
     return exp_power_kernel
 
@@ -71,6 +83,13 @@ def make_exp_power_jac(beta, power, scale):
                 power * np.power(distance / scale, power) / 2 - 1) / (
                     np.pi * scale * scale * scale * special.gamma(2.0 / power))
         ])
+        # jac = np.array([
+        #     np.exp(-np.power(distance / scale, power)),
+        #     beta  * np.exp(-np.power(distance / scale, power)) * (
+        #         -np.power(distance / scale, power)*np.nan_to_num(np.log(distance / scale))),
+        #     beta * np.exp(-np.power(distance / scale, power)) * (
+        #         power * np.power(distance / scale, power)) / scale
+        # ])
 
         return jac
 

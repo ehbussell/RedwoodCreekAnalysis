@@ -4,6 +4,7 @@ import os
 from collections import Counter
 import numpy as np
 from scipy import optimize
+from scipy.interpolate import interp1d
 import raster_tools
 
 
@@ -38,22 +39,28 @@ def meentemeyer_cdf(dist, params):
 
     return cdf_value
 
+def make_inv_cdf(params):
+    """Generate inverse cdf function of kernel."""
 
-def kernel_sample(params, num=1):
+    max_dist = optimize.root(lambda x: (meentemeyer_cdf(x, params) - 0.9999), x0=0).x[0]
+    distances = np.linspace(0, max_dist, int(1000*max_dist))
+    inv_cdf = interp1d(meentemeyer_cdf(distances, params), distances, fill_value="extrapolate")
+
+    return inv_cdf
+
+
+def kernel_sample(inv_cdf, num=1):
     """Generate sample(s) from Meentemeyer kernel."""
 
-    uniform_sample = np.random.rand(num)
+    uniform_sample = np.random.rand(int(num))
 
-    samples = np.array([optimize.root(lambda x: (meentemeyer_cdf(x, params) - unif_sam), x0=0).x[0]
-                        for unif_sam in uniform_sample])
+    samples = np.array(inv_cdf(uniform_sample))
 
     return samples
 
 
-def get_kernel_array(dist_samples, angle_samples, kernel_range=10, resolution=250):
-    """Extract array kernel from kernel samples"""
-
-    n_samples = len(dist_samples)
+def update_counter(counter_dict, dist_samples, angle_samples, kernel_range=10, resolution=250):
+    """Extract array kernel from kernel samples and update counter"""
 
     sample_x = (resolution/2) + (dist_samples * np.cos(angle_samples))
     sample_y = (resolution/2) + (dist_samples * np.sin(angle_samples))
@@ -62,33 +69,53 @@ def get_kernel_array(dist_samples, angle_samples, kernel_range=10, resolution=25
     cell_y = [int(y // resolution) + kernel_range for y in sample_y]
 
     all_cells = zip(cell_x, cell_y)
-    counter_dict = Counter(all_cells)
 
-    kernel_array = np.array([[counter_dict[(x, y)] / n_samples for y in range(2*kernel_range+1)]
-                             for x in range(2*kernel_range+1)])
-
-    return kernel_array
+    counter_dict.update(all_cells)
 
 
-def generate_kernel():
+def generate_kernel(file_name=None, params=None):
     """Generate ASCII raster format kernel for SOD simulations."""
 
-    meentemeyer_params = {
-        'gamma': 0.9947,
-        'alpha_1': 20.57,
-        'alpha_2': 9500
-    }
+    if file_name is None:
+        file_name = "Kernel_Raster_250.txt"
 
-    num_samples = int(1e8)
+    if params is None:
+        meentemeyer_params = {
+            'gamma': 0.9947,
+            'alpha_1': 20.57,
+            'alpha_2': 9500
+        }
+    else:
+        meentemeyer_params = {
+            'gamma': params['gamma'],
+            'alpha_1': params['alpha_1'],
+            'alpha_2': params['alpha_2']
+        }
+
+    num_samples = int(1e9)
+    samples_left = num_samples
+
+    max_bin_size = int(1e8)
     host_raster_eroi = raster_tools.RasterData.from_file(os.path.join(
         "GeneratedData", "EROI_Landscape", "HostDensity.txt"
     ))
     kernel_range = max(host_raster_eroi.array.shape)
+    counter_dict = Counter()
 
-    all_dist_samples = kernel_sample(meentemeyer_params, num=num_samples)
-    all_angle_samples = np.random.rand(num_samples) * 2 * np.pi
+    inv_cdf = make_inv_cdf(meentemeyer_params)
 
-    kernel_array = get_kernel_array(all_dist_samples, all_angle_samples, kernel_range=kernel_range)
+    while samples_left > 0:
+        nsamp = min(samples_left, max_bin_size)
+        dist_samples = kernel_sample(inv_cdf, num=nsamp)
+        angle_samples = np.random.rand(nsamp) * 2 * np.pi
+        samples_left -= nsamp
+        print("Block done")
+
+        update_counter(counter_dict, dist_samples, angle_samples, kernel_range, 250)
+
+    kernel_array = np.array([[counter_dict[(x, y)] / num_samples for y in range(2*kernel_range+1)]
+                             for x in range(2*kernel_range+1)])
     kernel_raster = raster_tools.RasterData(
         (2*kernel_range+1, 2*kernel_range+1), array=kernel_array, cellsize=250)
-    kernel_raster.to_file(os.path.join("GeneratedData", "Kernel_Raster_250.txt"))
+
+    kernel_raster.to_file(os.path.join("GeneratedData", file_name))

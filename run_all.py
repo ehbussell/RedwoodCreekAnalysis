@@ -33,10 +33,13 @@ default_config = OrderedDict([
             ("run", True)
         ])),
         ("generate_kernel", OrderedDict([
-            ("run", True)
+            ("run", True),
+            ("kernel_filename", None),
+            ("kernel_params", None)
         ])),
         ("run_simulations", OrderedDict([
-            ("run", True)
+            ("run", True),
+            ("add_options", None)
         ])),
         ("generate_likelihood", OrderedDict([
             ("run", True)
@@ -53,14 +56,14 @@ default_config = OrderedDict([
         ("test_resolutions", [2500, 2000, 1500, 1000, 500, 250]),
         ("kernel_names", ["Exponential", "Cauchy", "ExpPower"]),
         ("kernel_priors", [
-            {"beta": (0, 0.01), "scale": (0, 20000)},
-            {"beta": (0, 0.01), "scale": (0, 20000)},
-            {"beta": (0, 0.01), "power": (0, 2.0), "scale": (0, 20000)}
+            {"beta": (0, 1e-4), "scale": (0, 2)},
+            {"beta": (0, 1e-4), "scale": (0, 2)},
+            {"beta": (0, 1e-4), "power": (0, 5.0), "scale": (0, 2)}
         ]),
         ("kernel_init", [
-            {"beta": 0.005, "scale": 250},
-            {"beta": 0.005, "scale": 250},
-            {"beta": 0.005, "power": 0.6, "scale": 250}
+            {"beta": 1e-6, "scale": 0.2},
+            {"beta": 1e-6, "scale": 0.02},
+            {"beta": 1e-6, "power": 0.6, "scale": 0.2}
         ]),
         ("make_landscapes", OrderedDict([
             ("run", True),
@@ -68,20 +71,51 @@ default_config = OrderedDict([
         ])),
         ("make_likelihoods", OrderedDict([
             ("run", True),
-            ("n_simulations", None)
+            ("n_simulations", None),
+            ("simulation_stub", "output"),
+            ("likelihood_id", None)
         ])),
         ("fit_landscapes", OrderedDict([
             ("run", True),
+            ("fit_method", "MLE"),
+            ("likelihood_id", None),
+            ("reuse_start", None),
             ("make_plots", False),
             ("recalculate_plot_values", True),
             ("plot_linthresh", 1.0e6),
-            ("overwrite_results_file", True)
+            ("overwrite_results_file", True),
+            ("results_file_name", "FitResults.json")
         ])),
         ("test_fits", OrderedDict([
-            ("run", True)
+            ("run", True),
+            ("fit_results_file_name", "FitResults.json"),
+            ("output_id", "output"),
+            ("n_short_time_qa_periods", None)
+        ])),
+        ("test_control_fits", OrderedDict([
+            ("run", True),
+            ("budgets", [100, 500, 1000]),
+            ("fit_results_file_name", "FitResults.json"),
+            ("output_id", "output"),
+            ("n_short_time_qa_periods", None),
+            ("simulation_add_options", None),
+            ("simulation_stub", "output"),
+            ("control_rate", 1.0)
         ])),
         ("plot_fits", OrderedDict([
-            ("run", True)
+            ("run", True),
+            ("test_output_id", "output"),
+            ("output_name", "output"),
+            ("time_qa_plots", False),
+            ("include_short_time_qa", False)
+        ])),
+        ("plot_control_fits", OrderedDict([
+            ("run", True),
+            ("budgets", [100, 500, 1000]),
+            ("test_output_id", "output"),
+            ("output_name", "output"),
+            ("time_qa_plots", False),
+            ("include_short_time_qa", False)
         ]))
 
     ]))
@@ -107,14 +141,19 @@ def run_main_analysis(config_dict):
         generate_landscapes.generate_landscape(eroi, full_resolution, eroi_name, options)
         options['map_highlight_region'] = None
         # generate_landscapes.generate_landscape(roi, reduced_resolution, roi_name, options)
-    
+
     # Kernel generation stage
     if config_dict['main_analysis_options']['generate_kernel']['run']:
-        generate_kernel.generate_kernel()
+        file_name = config_dict['main_analysis_options']['generate_kernel']['kernel_filename']
+        kernel_params = config_dict['main_analysis_options']['generate_kernel'][
+            'kernel_params']
+        generate_kernel.generate_kernel(file_name, kernel_params)
 
     # Simulation running stage
     if config_dict['main_analysis_options']['run_simulations']['run']:
-        run_data = IndividualSimulator.main(os.path.join("InputData", "REDW_config.ini"))
+        add_options = config_dict['main_analysis_options']['run_simulations']['add_options']
+        run_data = IndividualSimulator.main(os.path.join("InputData", "REDW_config.ini"),
+                                            params_options=add_options)
 
     # Likelihood generation stage
     if config_dict['main_analysis_options']['generate_likelihood']['run']:
