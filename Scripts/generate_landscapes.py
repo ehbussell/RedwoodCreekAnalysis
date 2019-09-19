@@ -1,139 +1,22 @@
-# Redwood Creek Analysis
-# Landscape generation functions
+""" Redwood Creek Analysis: Landscape generation functions. """
 
+import logging
 import os
 import pyproj
 import numpy as np
 import pandas as pd
 
-import matplotlib as mpl
-import matplotlib.pyplot as plt
-from matplotlib.patches import Polygon
-from mpl_toolkits.basemap import Basemap
-from mpl_toolkits.axes_grid1 import make_axes_locatable
+import cartopy
+from cartopy.io.shapereader import Reader
+from functools import partial
+from shapely.ops import transform
+from shapely import geometry
 import shapefile
 
 import raster_tools
+from Scripts import average_weather
+from Scripts import MainOptions
 
-plt.style.use("ggplot")
-
-
-def print_all_options():
-    """Print all possible additional options to generate_landscape function."""
-
-    print("""
-generateLandscape.py
-
-Possible additional options:
-    'quiet'                 True/False, suppress printing details, default: False
-    'plots'                 True/False, whether to generate figure of map, default: True
-    'map_highlight_region'  Region coordinates to highlight on map, default: None
-    'map_detail'            c/l/i/h/f Level of detail in map plot, default: i
-    'init_cond_numbers'     True/False, generate initial conditions using host numbers as well as 
-                            host density. Default: True
-
-""")
-
-
-def create_map(host_raster, region, npark, highlight_region=None, detail="c"):
-    """Create figure showing host density across landscape."""
-
-    analysis_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..")
-
-    redw_x, redw_y = npark
-
-    wgs84 = pyproj.Proj("+init=EPSG:4326")
-    NAD83_Cali_Albers = pyproj.Proj("+init=EPSG:3310")
-    
-    resolution = host_raster.header_vals['cellsize']
-    NODATA_value = host_raster.header_vals['NODATA_value']
-    xmin = host_raster.header_vals['xllcorner']
-    xmax = xmin + host_raster.header_vals['ncols']*resolution
-    ymin = host_raster.header_vals['yllcorner']
-    ymax = ymin + host_raster.header_vals['nrows']*resolution
-
-    x_values = np.arange(xmin, xmax, resolution)
-    y_values = np.arange(ymin, ymax, resolution)
-
-    xx, yy = np.meshgrid(x_values, y_values)
-
-    for i in range(len(y_values)):
-        for j in range(len(x_values)):
-            x, y = pyproj.transform(NAD83_Cali_Albers, wgs84, xx[i, j], yy[i, j])
-            xx[i, j] = x
-            yy[i, j] = y
-
-    densities = host_raster.array
-    densities[densities == NODATA_value] = np.nan
-    densities_masked = np.ma.array(densities, mask=np.isnan(densities))
-
-    # Set up figure
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-
-    # Create map
-    base_map = Basemap(epsg=3310,
-                       llcrnrlat=region[0][1], llcrnrlon=region[0][0],
-                       urcrnrlat=region[1][1], urcrnrlon=region[1][0],
-                       resolution=detail)
-
-    # Basic features
-    base_map.drawmapboundary(fill_color='lightblue')
-    base_map.fillcontinents(color='lightgrey', lake_color='lightblue', zorder=1)
-    base_map.drawcoastlines()
-    base_map.drawcounties(zorder=10, linestyle='dashed')
-
-    # Add host density
-    xmin_wgs, ymin_wgs = pyproj.transform(NAD83_Cali_Albers, wgs84, xmin, ymin)
-    xmax_wgs, ymax_wgs = pyproj.transform(NAD83_Cali_Albers, wgs84, xmax, ymax)
-
-    xmin_map, ymin_map = base_map(xmin_wgs, ymin_wgs)
-    xmax_map, ymax_map = base_map(xmax_wgs, ymax_wgs)
-
-    cmap = plt.get_cmap("plasma")
-    norm = mpl.colors.Normalize(vmin=0, vmax=1)
-    im = plt.imshow(densities_masked, extent=[xmin_map, xmax_map, ymin_map, ymax_map],
-                     zorder=15, alpha=0.6, cmap=cmap, norm=norm)
-    cbar = base_map.colorbar(im)
-    cbar.set_label("Host Density")
-
-    # Add REDW NP
-    poly = Polygon([base_map(x, y) for x, y in zip(redw_x, redw_y)], facecolor='green',
-                   edgecolor='darkgreen', alpha=0.2, linewidth=3, zorder=20)
-    ax.add_patch(poly)
-
-    # Add highlighted region (if required)
-    if highlight_region is not None:
-        region_x = [highlight_region[0][0]]*2 + [highlight_region[1][0]]*2
-        region_y = [highlight_region[0][1]] + [highlight_region[1][1]]*2 + [highlight_region[0][1]]
-
-        poly2 = Polygon([base_map(x, y) for x, y in zip(region_x, region_y)],
-                        edgecolor='red', alpha=0.2, linewidth=3, zorder=25)
-        ax.add_patch(poly2)
-
-    # Add SODMAP positives
-    query = "Latitude > " + str(region[0][1]) + " & Latitude < " + str(region[1][1])
-    query += " & Longitude > " + str(region[0][0]) + " & Longitude < " + str(region[1][0])
-    query += " & State == 'Positive'"# & Date < '2010-07-01'"
-    sodmap_df = pd.read_csv(os.path.join(analysis_path, "InputData", "sodmap.csv"), parse_dates=True)
-    # region_df = sodmap_df.query(query)
-
-    region_df = sodmap_df.query(query).sort_values("Date")
-
-    positive_pos = (region_df['Longitude'].values[0], region_df['Latitude'].values[0])
-    base_map.plot(positive_pos[0], positive_pos[1], 'x', latlon=True, color="k",
-                markersize=10, zorder=30)
-
-    base_map.plot(region_df['Longitude'].values, region_df['Latitude'].values, '.', latlon=True, color="r",
-                markersize=2, zorder=28, alpha=0.5)
-
-
-    # positive_lat = region_df['Latitude'].values
-    # positive_lon = region_df['Longitude'].values
-    # base_map.plot(positive_lon, positive_lat, 'x', latlon=True, color="k",
-    #               markersize=5, zorder=30)
-
-    return fig
 
 def create_initial_conditions(host_array, out_stub="InitialConditions", seed_inf_cell=(0, 0),
                               host_numbers=False, prop_infected=1.0):
@@ -175,36 +58,15 @@ def create_initial_conditions(host_array, out_stub="InitialConditions", seed_inf
     init_r_raster.to_file(os.path.join("GeneratedData", out_stub + "_R.txt"))
 
 
-def generate_landscape(region, resolution, name, options=None, print_options=False):
+def generate_landscape(region, resolution, name):
     """Create necessary host files for a given landscape region.
 
     Arguments:
         region:         Tuple of coordinates for llcorner and urcorner, each (long, lat)
         resolution:     Required resolution of output raster
         name:           Output landscape name for file outputs
-        options:        Dictionary of additional options.
-        print_options:  If True print all possible additional options to screen and exit
     """
 
-    if print_options:
-        print_all_options()
-        return None
-
-    if options is None:
-        options = {}
-    
-    # Set default options
-    if 'quiet' not in options:
-        options['quiet'] = False
-    if 'plots' not in options:
-        options['plots'] = True
-    if 'map_highlight_region' not in options:
-        options['map_highlight_region'] = None
-    if 'map_detail' not in options:
-        options['map_detail'] = 'i'
-    if 'init_cond_numbers' not in options:
-        options['init_cond_numbers'] = True
-    
     analysis_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..")
 
     # Change coordinates to same format as raster
@@ -227,10 +89,8 @@ def generate_landscape(region, resolution, name, options=None, print_options=Fal
     # Save host density raster to file
     host_raster.to_file(os.path.join("GeneratedData", name, "HostDensity.txt"))
 
-    # Print size of raster
-    if not options['quiet']:
-        print("Size of " + name + " raster: {0}x{1}".format(
-            host_raster.header_vals['nrows'], host_raster.header_vals['ncols']))
+    logging.info("Size of %s raster: %dx%d", name, host_raster.header_vals['nrows'],
+                 host_raster.header_vals['ncols'])
 
     # Extract host numbers
     host_num_raster = raster_tools.extract_raster(
@@ -241,34 +101,19 @@ def generate_landscape(region, resolution, name, options=None, print_options=Fal
 
     host_num_raster.to_file(os.path.join("GeneratedData", name, "HostNumbers.txt"))
 
-    # Get REDW NP shape
-    sf = shapefile.Reader(os.path.join(analysis_path, "InputData", "nps_boundary", "nps_boundary"))
-    park_names = [x.record[2] for x in sf.shapeRecords()]
-    redw_idx = [i for i, x in enumerate(park_names) if "Redwood" in x][0]
-    redw_shp = sf.shapes()[redw_idx]
+    logging.info("Starting NP mask raster")
+    np_raster = make_np_mask(host_num_raster.header_vals)
+    np_raster.to_file(os.path.join("GeneratedData", name, "NPMask.txt"))
 
-    redw_x_4269 = [x[0] for x in redw_shp.points]
-    redw_y_4269 = [x[1] for x in redw_shp.points]
-
-    # Convert REDW to lat/long
-    redw_x, redw_y = pyproj.transform(nps_proj, wgs84, redw_x_4269, redw_y_4269)
-
-    # Create region files
-    # Not yet implemented
-
-    # Create plot of host landscape
-    if options['plots']:
-        fig = create_map(host_raster, region, (redw_x, redw_y), options['map_highlight_region'],
-                         detail=options['map_detail'])
-        fig.tight_layout()
-        fig.savefig(os.path.join("Figures", name + "_map.png"), dpi=1200, transparent=True)
+    logging.info("Starting initial conditions")
 
     # Generate initial conditions
     # Find location of first SODMAP positive in region
     query = "Latitude > " + str(region[0][1]) + " & Latitude < " + str(region[1][1])
     query += " & Longitude > " + str(region[0][0]) + " & Longitude < " + str(region[1][0])
     query += " & State == 'Positive'"
-    sodmap_df = pd.read_csv(os.path.join(analysis_path, "InputData", "sodmap.csv"), parse_dates=True)
+    sodmap_df = pd.read_csv(
+        os.path.join(analysis_path, "InputData", "sodmap.csv"), parse_dates=True)
     region_df = sodmap_df.query(query).sort_values("Date")
 
     positive_pos = (region_df['Longitude'].values[0], region_df['Latitude'].values[0])
@@ -279,18 +124,68 @@ def generate_landscape(region, resolution, name, options=None, print_options=Fal
     # Find cell in each raster
     cell_pos = raster_tools.find_position_in_raster(positive_pos_3310, host_raster)
 
+    logging.info("Found source cell")
+
     # Create initial condition files
     base_host_raster = raster_tools.extract_raster(
-        os.path.join(analysis_path, "InputData", "combinedHostsScenario0.txt"), llcorner_3310, urcorner_3310,
-        resolution=250)
+        os.path.join(analysis_path, "InputData", "combinedHostsScenario0.txt"), llcorner_3310,
+        urcorner_3310, resolution=250)
     base_cell_pos = raster_tools.find_position_in_raster(positive_pos_3310, base_host_raster)
     base_inf_density = base_host_raster.array[base_cell_pos]
     ncells = (resolution/250)*(resolution/250)
     prop_inf = base_inf_density / (host_raster.array[cell_pos] * ncells)
-    if options['init_cond_numbers']:
-        create_initial_conditions(
-            host_num_raster, out_stub=os.path.join(name, "InitialConditions_Numbers"),
-            seed_inf_cell=cell_pos, prop_infected=prop_inf, host_numbers=True)
+    create_initial_conditions(
+        host_num_raster, out_stub=os.path.join(name, "InitialConditions_Numbers"),
+        seed_inf_cell=cell_pos, prop_infected=prop_inf, host_numbers=True)
     create_initial_conditions(
         host_raster, out_stub=os.path.join(name, "InitialConditions_Density"),
         seed_inf_cell=cell_pos, prop_infected=prop_inf, host_numbers=False)
+
+    # Create averaged weather and forest type mask
+    avg_mask = average_weather.average_mask(target_header=host_raster.header_vals)
+    avg_mask.to_file(os.path.join("GeneratedData", name, "RMSMask.txt"))
+
+def make_np_mask(target_header):
+    """Generate mask of cells that are in Redwood National Park"""
+
+    rdr = Reader(os.path.join("InputData", "nps_boundary", "nps_boundary.shp"))
+    redw_records = []
+    for x in rdr.records():
+        if 'Redwood' in x.attributes['UNIT_NAME']:
+            redw_records.append(x)
+
+    redw_shape_nps = redw_records[0].geometry[0]
+
+    NAD83_Cali_Albers = pyproj.Proj("+init=EPSG:3310")
+    nps_proj = pyproj.Proj("+init=EPSG:4269")
+
+    project = partial(pyproj.transform, nps_proj, NAD83_Cali_Albers)
+
+    redw_shape = transform(project, redw_shape_nps)
+
+    lower_x = np.array([target_header['xllcorner'] + i*target_header['cellsize']
+                        for i in range(target_header['ncols'])])
+    upper_x = lower_x + target_header['cellsize']
+
+    lower_y = np.array([target_header['yllcorner'] + i*target_header['cellsize']
+                        for i in range(target_header['nrows'])])[::-1]
+    upper_y = lower_y + target_header['cellsize']
+
+    np_array = np.zeros((target_header['nrows'], target_header['ncols']))
+
+    for i in range(target_header['nrows']):
+        for j in range(target_header['ncols']):
+            points = [[lower_x[j], lower_y[i]], [upper_x[j], lower_y[i]], [upper_x[j], upper_y[i]],
+                      [lower_x[j], upper_y[i]]]
+            cell = geometry.Polygon(points)
+            intersection_area = redw_shape.intersection(cell).area / (
+                target_header['cellsize'] * target_header['cellsize'])
+
+            np_array[i, j] = intersection_area
+
+    np_raster = raster_tools.RasterData(
+        (target_header['nrows'], target_header['ncols']),
+        (target_header['xllcorner'], target_header['yllcorner']), target_header['cellsize'],
+        array=np_array)
+
+    return np_raster

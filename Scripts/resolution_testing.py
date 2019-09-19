@@ -1,179 +1,91 @@
 """Script running resolution tests for Redwood Creek analysis."""
 
-import os
-import time
-import pickle
+from IPython import embed
+import argparse
 import json
-import pdb
-from datetime import timedelta
-import numpy as np
+import logging
+import os
+import pickle
+import h5py
 import matplotlib.pyplot as plt
-import matplotlib as mpl
+import numpy as np
+import pandas as pd
+from scipy.spatial.distance import pdist, squareform
+from scipy.interpolate import interp1d
+from scipy.optimize import minimize
 
-import IndividualSimulator
-from IndividualSimulator.utilities import output_data
 from RasterModel import raster_model_fitting
 from RasterModel import raster_model
 import raster_tools
-from . import generate_landscapes
-from . import kernels
-from . import fit_test
-from . import NSWEIntervention
+from Scripts import generate_landscapes
+from Scripts import kernels
+from Scripts import fit_test
+from Scripts import MainOptions
+from Scripts import summarise_sims
+from Scripts import optimise_control
 
+OPTIONS = {
+    'test_resolutions': [5000, 2500, 2000, 1500, 1000, 500, 250],
+    'kernel_names': ["Exponential", "Cauchy"],
+    'fit_method': 'SSE',
 
-def run_resolution_testing(config_dict):
-    """Run tests with appropriate stages."""
+    # Kernel prior for each resolution and for each kernel
+    'kernel_priors': [
+        [{"beta": (0, 0.05), "scale": (0, 5)}, {"beta": (1e-6, 0.01), "scale": (1e-6, 5)}],
+        [{"beta": (0, 0.05), "scale": (0, 5)}, {"beta": (1e-6, 0.01), "scale": (1e-6, 5)}],
+        [{"beta": (0, 0.05), "scale": (0, 5)}, {"beta": (1e-5, 0.01), "scale": (1e-4, 5)}],
+        [{"beta": (0, 0.1), "scale": (0, 5)}, {"beta": (1e-6, 0.01), "scale": (1e-3, 5)}],
+        [{"beta": (0, 1), "scale": (0, 5)}, {"beta": (1e-5, 0.01), "scale": (1e-4, 5)}],
+        [{"beta": (0, 2), "scale": (0, 5)}, {"beta": (1e-5, 0.1), "scale": (1e-2, 5)}],
+        [{"beta": (0.05, 2), "scale": (0, 5)}, {"beta": (1e-5, 0.1), "scale": (1e-2, 5)}]
+    ],
 
-    print("#"*32 + "\n## Running Resolution Testing ##\n" + "#"*32)
+    # Kernel intialisation for each resolution and for each kernel
+    'kernel_inits': [
+        [{"beta": 0.001, "scale": 0.2}, {"beta": 0.0005, "scale": 0.3}],
+        [{"beta": 0.005, "scale": 0.4}, {"beta": 0.005, "scale": 0.2}],
+        [{"beta": 0.005, "scale": 0.5}, {"beta": 0.002, "scale": 0.2}],
+        [{"beta": 0.01, "scale": 0.7}, {"beta": 0.008, "scale": 0.2}],
+        [{"beta": 0.1, "scale": 1.0}, {"beta": 0.006, "scale": 0.2}],
+        [{"beta": 0.5, "scale": 2.0}, {"beta": 0.03, "scale": 0.02}],
+        [{"beta": 0.5, "scale": 3.5}, {"beta": 0.03, "scale": 0.02}]
+    ]
+}
 
-    roi = config_dict['general_options']['roi_extent']
-    eroi = config_dict['general_options']['eroi_extent']
-
-    full_resolution = 250
-    test_resolutions = config_dict['resolution_testing_options']['test_resolutions']
-
-    run_stats = {}
-
-    if config_dict['resolution_testing_options']['make_landscapes']['run']:
-        print("\nMaking Landscapes...\n")
-        time1 = time.time()
-        make_landscapes(config_dict, test_resolutions, roi)
-        time2 = time.time()
-        run_stats["Make_Landscapes_Time"] = str(timedelta(seconds=time2-time1))
-
-    if config_dict['resolution_testing_options']['make_likelihoods']['run']:
-        print("\nMaking Likelihoods...\n")
-        time1 = time.time()
-        make_likelihoods(config_dict, test_resolutions)
-        time2 = time.time()
-        run_stats["Make_Likelihoods_Time"] = str(timedelta(seconds=time2-time1))
-
-    if config_dict['resolution_testing_options']['fit_landscapes']['run']:
-        print("\nFitting Landscapes...\n")
-        time1 = time.time()
-        fit_landscapes(config_dict, test_resolutions, full_resolution)
-        time2 = time.time()
-        run_stats["Fit_Landscapes_Time"] = str(timedelta(seconds=time2-time1))
-
-    if config_dict['resolution_testing_options']['test_fits']['run']:
-        print("\nTesting Fits...\n")
-        time1 = time.time()
-        test_fits(config_dict, test_resolutions, full_resolution)
-        time2 = time.time()
-        run_stats["Test_Fits_Time"] = str(timedelta(seconds=time2-time1))
-
-    if config_dict['resolution_testing_options']['test_control_fits']['run']:
-        print("\nTesting Fits under Control...\n")
-        time1 = time.time()
-        test_control_fits(config_dict, test_resolutions, full_resolution)
-        time2 = time.time()
-        run_stats["Test_Control_Fits_Time"] = str(timedelta(seconds=time2-time1))
-
-    if config_dict['resolution_testing_options']['plot_fits']['run']:
-        print("\nPlotting Fit Asessments...\n")
-        time1 = time.time()
-        plot_fits(config_dict, test_resolutions, full_resolution)
-        time2 = time.time()
-        run_stats["Plot_Fits_Time"] = str(timedelta(seconds=time2-time1))
-
-    if config_dict['resolution_testing_options']['plot_control_fits']['run']:
-        print("\nPlotting Control Fit Asessments...\n")
-        time1 = time.time()
-        plot_control_fits(config_dict, test_resolutions, full_resolution)
-        time2 = time.time()
-        run_stats["Plot_Control_Fits_Time"] = str(timedelta(seconds=time2-time1))
-
-    return run_stats
-
-def make_landscapes(config_dict, test_resolutions, roi):
+def make_landscapes(test_resolutions, roi):
     """Generate landscapes"""
 
     for resolution in test_resolutions:
         landscape_name = "ROI_" + str(resolution) + "Landscape"
-        options = {
-            'plots': config_dict['resolution_testing_options']['make_landscapes']['make_plots']
-        }
-        generate_landscapes.generate_landscape(roi, resolution, landscape_name, options)
-
-def make_likelihoods(config_dict, test_resolutions):
-    """Precalculate likelihood functions."""
-
-    for resolution in test_resolutions:
-        # Make likelihood function
-        landscape_name = "ROI_" + str(resolution) + "Landscape"
-        raster_header = raster_tools.RasterData.from_file(
-            os.path.join("GeneratedData", landscape_name, "HostNumbers.txt")).header_vals
-
-        if resolution >= 1500:
-            precompute_level = "full"
+        if os.path.isdir(os.path.join("GeneratedData", landscape_name)):
+            logging.info("%dm resoution landscape already exists", resolution)
         else:
-            precompute_level = "partial"
+            logging.info("Generating %dm resoution landscape", resolution)
+            generate_landscapes.generate_landscape(roi, resolution, landscape_name)
 
-        simulation_stub = os.path.join(
-            "GeneratedData", "SimulationRuns",
-            config_dict['resolution_testing_options']['make_likelihoods']['simulation_stub'])
-
-        likelihood_function = raster_model_fitting.precompute_loglik(
-            data_stub=simulation_stub,
-            nsims=None, raster_header=raster_header, end_time=1000, ignore_outside_raster=True,
-            precompute_level=precompute_level)
-
-        save_file = os.path.join("GeneratedData", "SimulationRuns",
-                                 landscape_name+"_likelihood")
-        likelihood_id = config_dict[
-            'resolution_testing_options']['make_likelihoods']['likelihood_id']
-        if likelihood_id is not None:
-            save_file += "_" + likelihood_id
-        likelihood_function.save(save_file, identifier=landscape_name)
-
-def fit_landscapes(config_dict, test_resolutions, full_resolution):
+def fit_landscapes(out_file, config_dict, test_resolutions, full_resolution, sim_stub,
+                   append=False):
     """Fit raster model kernel parameters to simulation data."""
 
-    if config_dict['resolution_testing_options']['fit_landscapes']['overwrite_results_file']:
-        all_fit_results = {}
-    else:
-        filename = os.path.join(
-            "GeneratedData", "RasterFits",
-            config_dict['resolution_testing_options']['fit_landscapes']['results_file_name'])
+    if append:
         try:
-            with open(filename, "r") as fin:
+            with open(out_file, "r") as fin:
                 all_fit_results = json.load(fin)
         except FileNotFoundError:
+            logging.warning("FitResults file not found! Starting new results.")
             all_fit_results = {}
+    else:
+        all_fit_results = {}
 
-    reuse_start = os.path.join(
-        "GeneratedData", "RasterFits",
-        config_dict['resolution_testing_options']['fit_landscapes']['reuse_start'])
-    with open(reuse_start, "r") as fin:
-        previous_results = json.load(fin)
-
-    for resolution in test_resolutions:
-        t1 = time.time()
+    for i, resolution in enumerate(test_resolutions):
+        logging.info("Starting fit for %dm resolution.", resolution)
         landscape_name = "ROI_" + str(resolution) + "Landscape"
         raster_header = raster_tools.RasterData.from_file(
             os.path.join("GeneratedData", landscape_name, "HostNumbers.txt")).header_vals
 
-        kernel_names = config_dict['resolution_testing_options']['kernel_names']
-        kernel_priors = [{} for _ in kernel_names]
-        param_start = [{} for _ in kernel_names]
-        if reuse_start is None:
-            # Initialise from parameters given in config file
-            for i, kernel in enumerate(kernel_names):
-                params = config_dict['resolution_testing_options']['kernel_priors'][i].keys()
-                for param in params:
-                    kernel_priors[i][param] = config_dict['resolution_testing_options'][
-                        'kernel_priors'][i][param]
-                    param_start[i][param] = config_dict['resolution_testing_options'][
-                        'kernel_init'][i][param]
-                    if param == "scale":
-                        kernel_priors[i][param] = kernel_priors[i][param]
-                        param_start[i][param] = param_start[i][param]
+        kernel_names = OPTIONS['kernel_names']
 
-        else:
-            # Initialise from previous results
-            for i, kernel in enumerate(kernel_names):
-                kernel_priors[i] = previous_results[landscape_name][kernel]["Prior"]
-                param_start[i] = previous_results[landscape_name][kernel]["Initialisation"]
+        sus_inf_file = os.path.join("GeneratedData", landscape_name, "RMSMask.txt")
 
         kernel_generators = []
         kernel_jac_generators = []
@@ -190,7 +102,7 @@ def fit_landscapes(config_dict, test_resolutions, full_resolution):
             else:
                 raise ValueError("Unknown kernel name!")
 
-        fit_method = config_dict['resolution_testing_options']['fit_landscapes']['fit_method']
+        fit_method = OPTIONS['fit_method']
         if fit_method == "MLE":
             likelihood_id = config_dict['resolution_testing_options']['fit_landscapes'][
                 'likelihood_id']
@@ -201,31 +113,39 @@ def fit_landscapes(config_dict, test_resolutions, full_resolution):
                 save_file = os.path.join("GeneratedData", "SimulationRuns",
                                          landscape_name+"_likelihood_" + likelihood_id + ".npz")
             lik_loaded = raster_model_fitting.LikelihoodFunction.from_file(save_file)
+        elif fit_method == "SSE":
+            # Check if simulation summaries have been generated
+            if not os.path.isfile(os.path.join(sim_stub, "summaries", landscape_name + '.h5')):
+                # If not then summarise simulations at this resolution
+                summarise_sims.summarise_sims(
+                    target_header=raster_header, region=MainOptions.OPTIONS['roi'],
+                    sim_stub=sim_stub, landscape_name=landscape_name)
 
-        zipped_values = zip(kernel_names, kernel_generators, kernel_jac_generators,
-                            kernel_priors, param_start)
+        zipped_values = zip(kernel_names, kernel_generators, kernel_jac_generators)
 
-        for name, gen, jac, prior, start in zipped_values:
+        for j, (name, gen, jac) in enumerate(zipped_values):
+            prior = OPTIONS['kernel_priors'][i][j]
+            start = OPTIONS['kernel_inits'][i][j]
 
             primary_rate = bool("PrimaryRate" in prior)
 
             if fit_method == "MLE":
                 opt_params, fit_output = raster_model_fitting.fit_raster_MLE(
-                    data_stub=os.path.join("GeneratedData", "SimulationRuns", "output"),
-                    kernel_generator=gen, kernel_params=prior, param_start=start,
-                    target_raster=raster_header, nsims=None, likelihood_func=lik_loaded,
-                    kernel_jac=jac, raw_output=True, primary_rate=primary_rate
-                )
+                    data_stub=sim_stub, kernel_generator=gen, kernel_params=prior,
+                    param_start=start, target_raster=raster_header, nsims=None,
+                    likelihood_func=lik_loaded, kernel_jac=jac, raw_output=True,
+                    primary_rate=primary_rate)
             elif fit_method == "SSE":
                 model_params = {
                     'inf_rate': 1.0,
                     'control_rate': 0,
-                    'max_budget_rate': 0,
-                    'coupling': None,
-                    'times': np.linspace(0, 1000, 101),
+                    'coupling': np.zeros((raster_header['nrows'], raster_header['ncols'])),
+                    'times': MainOptions.OPTIONS['times'],
                     'max_hosts': int(100 * np.power(resolution / full_resolution, 2)),
                     'primary_rate': 0
                 }
+
+                sim_sum_file = os.path.join(sim_stub, "summaries", landscape_name + ".h5")
 
                 host_file = os.path.join("GeneratedData", landscape_name, "HostDensity.txt")
                 s_init_file = os.path.join("GeneratedData", landscape_name,
@@ -238,15 +158,14 @@ def fit_landscapes(config_dict, test_resolutions, full_resolution):
                     initial_i_file=i_init_file)
 
                 opt_params, fit_output = raster_model_fitting.fit_raster_SSE(
-                    model=model, kernel_generator=gen, kernel_params=prior,
-                    data_stub=os.path.join("GeneratedData", "SimulationRuns", "output"),
-                    param_start=start, nsims=None, target_raster=raster_header, raw_output=True,
-                    primary_rate=primary_rate
+                    model=model, kernel_generator=gen, kernel_params=prior, data_path=sim_sum_file,
+                    param_start=start, n_sims=None, target_header=raster_header, raw_output=True,
+                    primary_rate=primary_rate, sus_file=sus_inf_file, inf_file=sus_inf_file
                 )
             else:
                 raise ValueError("Unrecognised fit method!")
 
-            print("Complete. {0}, {1} kernel: {2}".format(landscape_name, name, opt_params))
+            logging.info("Optimisation completed %s %s %s", landscape_name, name, opt_params)
 
             opt_params['Raw_Output'] = fit_output.__repr__()
             opt_params['Prior'] = prior
@@ -260,92 +179,63 @@ def fit_landscapes(config_dict, test_resolutions, full_resolution):
                     name: opt_params
                 }
 
-            outfile = os.path.join(
-                "GeneratedData", "RasterFits",
-                config_dict['resolution_testing_options']['fit_landscapes']['results_file_name']
-            )
-            with open(outfile, "w") as f_out:
+            with open(out_file, "w") as f_out:
                 json.dump(all_fit_results, f_out, indent=4)
 
-            if config_dict['resolution_testing_options']['fit_landscapes']['make_plots']:
-                plot_likelihood(landscape_name, name, gen, opt_params, lik_loaded, config_dict,
-                                prior)
+        logging.info("Fit for %dm resolution complete.", resolution)
 
-        t2 = time.time()
-        time_taken = timedelta(seconds=t2-t1)
-        print("Landscape ROI_" + str(resolution) +
-              " Fitted. Time taken: {0}s".format(str(time_taken)))
+def test_fits(sim_stub, fit_results_file, output_id=None, control_stub=None):
+    """Test metrics for quality of fit as approximate model resolution is changed."""
 
-def test_fits(config_dict, test_resolutions, full_resolution):
-    """Assess fits of raster models to simulation data."""
+    if output_id is None:
+        output_id = ""
+    else:
+        output_id = "_" + str(output_id)
 
-    data_path = os.path.join("GeneratedData", "SimulationRuns", "output")
     base_raster = raster_tools.RasterData.from_file(
-        os.path.join("GeneratedData", "ROI_250Landscape", "HostDensity.txt"))
+        os.path.join("GeneratedData", "ROI_250Landscape", "HostNumbers.txt"))
     base_raster_header = base_raster.header_vals
     dimensions = (base_raster_header['nrows'], base_raster_header['ncols'])
-    ncells = np.prod(dimensions)
 
-    test_times = np.linspace(0, 1000, 101)
+    test_times = MainOptions.OPTIONS['times']
 
     # Simulation data at full resolution
-    base_data = output_data.create_cell_data(
-        data_path, target_header=base_raster_header, ignore_outside_raster=True)
-    sim_dpcs = np.zeros((len(base_data), len(test_times), ncells))
-    for i, dataset in enumerate(base_data):
-        for cell in range(ncells):
-            current_i = None
-            idx = 0
-            for t, _, i_state, *_ in dataset[cell]:
-                while t > test_times[idx]:
-                    sim_dpcs[i, idx, cell] = current_i
-                    idx += 1
-                    if idx > len(test_times):
-                        break
-                current_i = i_state
-            while idx != len(test_times):
-                sim_dpcs[i, idx, cell] = current_i
-                idx += 1
+    file_path = os.path.join(sim_stub, "summaries", "ROI_250Landscape.h5")
+    with h5py.File(file_path, 'r') as hf:
+        sim_dpcs = hf['sim_summary_I'][:]
+    logging.info("Extracted simulation data at full resolution")
 
-    sim_land_dpcs = np.sum(sim_dpcs, axis=2)
-
-    infile = os.path.join(
-        "GeneratedData", "RasterFits",
-        config_dict['resolution_testing_options']['test_fits']['fit_results_file_name'])
-    with open(infile, "r") as fin:
+    with open(fit_results_file, "r") as fin:
         all_fit_results = json.load(fin)
 
-    n_short_time_qa_periods = config_dict[
-        'resolution_testing_options']['test_fits']['n_short_time_qa_periods']
+    test_resolutions = OPTIONS['test_resolutions']
 
     for resolution in test_resolutions:
         # Setup fit testing structure for this landscape
         landscape_name = "ROI_" + str(resolution) + "Landscape"
 
-        run_raster = raster_tools.RasterData.from_file(
-            os.path.join("GeneratedData", landscape_name, "HostDensity.txt"))
-        run_raster_header = run_raster.header_vals
-        dimensions_agg = (run_raster_header['nrows'], run_raster_header['ncols'])
+        host_number_raster = raster_tools.RasterData.from_file(
+            os.path.join("GeneratedData", landscape_name, "HostNumbers.txt"))
+
+        dimensions_agg = (host_number_raster.header_vals['nrows'],
+                          host_number_raster.header_vals['ncols'])
         ncells_agg = np.prod(dimensions_agg)
 
+        # Check if simulation summaries have been generated
+        if not os.path.isfile(os.path.join(sim_stub, "summaries", landscape_name + '.h5')):
+            # If not then summarise simulations at this resolution
+            summarise_sims.summarise_sims(
+                target_header=host_number_raster.header_vals, region=MainOptions.OPTIONS['roi'],
+                sim_stub=sim_stub, landscape_name=landscape_name)
+
         # Simulation data aggregated to ODE raster run resolution
-        aggregated_base_data = output_data.create_cell_data(
-            data_path, target_header=run_raster_header, ignore_outside_raster=True)
-        sim_agg_dpcs = np.zeros((len(aggregated_base_data), len(test_times), ncells_agg))
-        for i, dataset in enumerate(aggregated_base_data):
-            for cell in range(ncells_agg):
-                current_i = None
-                idx = 0
-                for t, _, i_state, *_ in dataset[cell]:
-                    while t > test_times[idx]:
-                        sim_agg_dpcs[i, idx, cell] = current_i
-                        idx += 1
-                        if idx > len(test_times):
-                            break
-                    current_i = i_state
-                while idx != len(test_times):
-                    sim_agg_dpcs[i, idx, cell] = current_i
-                    idx += 1
+        file_path = os.path.join(sim_stub, "summaries", landscape_name + ".h5")
+        with h5py.File(file_path, 'r') as hf:
+            sim_agg_dpcs = hf['sim_summary_I'][:]
+        logging.info("Extracted simulation data at %dm resolution", resolution)
+
+        # Simulation DPCs at landscape scale
+        sim_land_dpcs = np.sum(sim_agg_dpcs, axis=1)
 
         all_sim_data = {
             "Divided": sim_dpcs,
@@ -354,14 +244,24 @@ def test_fits(config_dict, test_resolutions, full_resolution):
         }
 
         tested_fit = fit_test.TestedFit(
-            landscape_name, base_raster, run_raster, all_sim_data, test_times)
+            landscape_name, base_raster, host_number_raster, test_times, sim_stub)
 
-        if n_short_time_qa_periods is not None:
-            tested_fit_short = fit_test.TestedFit(
-                landscape_name, base_raster, run_raster, all_sim_data, test_times,
-                coupled_runs=True)
+        if control_stub is not None:
+            results_rogue = pd.read_csv(control_stub + "_v.csv")
+            results_thin = pd.read_csv(control_stub + "_u.csv")
 
-        kernel_names = config_dict['resolution_testing_options']['kernel_names']
+            # Convert 2500m non-spatial scheme to same rate at this resolution
+            rogue_total = results_rogue.values[:, 1:].sum(axis=1) / ncells_agg
+            thin_total = results_thin.values[:, 1:].sum(axis=1) / ncells_agg
+
+            tested_fit.rogue_scheme = interp1d(
+                results_rogue['time'], np.tile(rogue_total, (ncells_agg, 1)), kind="zero",
+                fill_value="extrapolate")
+            tested_fit.thin_scheme = interp1d(
+                results_thin['time'], np.tile(thin_total, (ncells_agg, 1)), kind="zero",
+                fill_value="extrapolate")
+
+        kernel_names = OPTIONS['kernel_names']
         kernel_generators = []
         for name in kernel_names:
             if name == "Exponential":
@@ -382,29 +282,27 @@ def test_fits(config_dict, test_resolutions, full_resolution):
             opt_params.pop("Initialisation", None)
             primary_rate = opt_params.pop('PrimaryRate', 0.0)
 
-            print("Resolution: {0}, Kernel: {1}".format(resolution, kernel_name), opt_params)
-            print("PrimaryRate: {0}".format(primary_rate))
-
-            coupling = np.ones((ncells_agg, ncells_agg))
             kernel = kernel_gen(**opt_params)
+            max_hosts = int(100 * np.power(resolution / 250, 2))
 
-            control_rate = 0
-            max_budget_rate = 0
+            sus_file = 'GeneratedData/' + landscape_name + '/RMSMask.txt'
+            sus_raster = raster_tools.RasterData.from_file(sus_file)
+            susceptibility = np.clip(sus_raster.array, 0, None).flatten()
+            inf_raster = raster_tools.RasterData.from_file(sus_file)
+            infectiousness = np.clip(inf_raster.array, 0, None).flatten()
 
-            for i in range(ncells_agg):
-                for j in range(ncells_agg):
-                    dx = abs((i % dimensions_agg[1]) - (j % dimensions_agg[1]))
-                    dy = abs(int(i/dimensions_agg[1]) - int(j/dimensions_agg[1]))
-                    dist = np.sqrt(dx*dx + dy*dy)
-                    coupling[i, j] = kernel(dist)
+            x = np.arange(ncells_agg) % dimensions_agg[1]
+            y = np.array(np.arange(ncells_agg) / dimensions_agg[1], dtype=int)
+            locs = np.array(list(zip(x, y)))
+            dist_condensed = pdist(locs)
+            distances = squareform(dist_condensed)
 
-            # times = np.linspace(0, 1000, 501)
-            max_hosts = int(100 * np.power(resolution / full_resolution, 2))
+            coupling = kernel(distances) * infectiousness * susceptibility[:, np.newaxis]
+            control_scaling = np.power(2500 / resolution, 2)
 
             params = {
                 'inf_rate': 1.0,
-                'control_rate': control_rate,
-                'max_budget_rate': max_budget_rate,
+                'control_rate': MainOptions.OPTIONS['control_rate'] * control_scaling,
                 'coupling': coupling,
                 'times': test_times,
                 'max_hosts': max_hosts,
@@ -421,930 +319,259 @@ def test_fits(config_dict, test_resolutions, full_resolution):
                 params, host_density_file=host_file, initial_s_file=s_init_file,
                 initial_i_file=i_init_file)
 
-            # TODO change to ndarray format rather than dictionary? - easier to work with
-            no_control_tmp = approx_model.run_scheme(approx_model.no_control_policy)
-            no_control_results = {}
+            no_control_tmp = approx_model.run_scheme(
+                tested_fit.thin_scheme, tested_fit.rogue_scheme)
+
+            no_control_results = np.zeros((ncells_agg, len(test_times)))
             for cell in range(ncells_agg):
-                s_vals = no_control_tmp.results_s["Cell" + str(cell)].values
-                i_vals = no_control_tmp.results_i["Cell" + str(cell)].values
-                t_vals = no_control_tmp.results_s["time"].values
-                no_control_results[cell] = np.column_stack((t_vals, s_vals, i_vals))
+                no_control_results[cell] = (no_control_tmp.results_i["Cell" + str(cell)].values)
 
-            no_control_metrics = calculate_metric(
-                tested_fit, no_control_results, run_raster_header, base_raster_header,
-                kernel_name, metric="RMSE")
+            metric_vals, cell_data, time_data = calculate_metric(
+                all_sim_data, no_control_results, host_number_raster.header_vals,
+                base_raster_header)
 
-            if n_short_time_qa_periods is not None:
-                run_short_qa(tested_fit_short, run_raster_header, base_raster_header,
-                             kernel_name, landscape_name, approx_model, n_short_time_qa_periods)
+            logging.info("Metrics for %s (no control): %s", landscape_name, metric_vals)
 
-            print(no_control_metrics)
+            tested_fit.add_kernel(
+                kernel_name, kernel_gen, cell_data, metric_vals, time_data, opt_params)
 
-        tested_fit.save(os.path.join(
-            "GeneratedData", "RasterFits", landscape_name + "FitTest_" +
-            config_dict['resolution_testing_options']['test_fits']['output_id'] + ".pickle"))
-
-        if n_short_time_qa_periods is not None:
-            tested_fit_short.save(os.path.join(
-                "GeneratedData", "RasterFits", landscape_name + "FitTest_" +
-                config_dict['resolution_testing_options']['test_fits']['output_id'] +
-                "_ShortQA.pickle"))
-
-def test_control_fits(config_dict, test_resolutions, full_resolution):
-    """Assess fits of raster models under control."""
-
-    all_budgets = config_dict['resolution_testing_options']['test_control_fits']['budgets']
-    control_rate = config_dict['resolution_testing_options']['test_control_fits'][
-        'control_rate']
-    test_times = np.linspace(0, 1000, 101)
-
-    n_short_time_qa_periods = config_dict[
-        'resolution_testing_options']['test_control_fits']['n_short_time_qa_periods']
-
-    base_raster = raster_tools.RasterData.from_file(
-        os.path.join("GeneratedData", "ROI_250Landscape", "HostDensity.txt"))
-    base_raster_header = base_raster.header_vals
-    dimensions = (base_raster_header['nrows'], base_raster_header['ncols'])
-    ncells = np.prod(dimensions)
-
-    for resolution in test_resolutions:
-        # Setup fit testing structure for this landscape
-        landscape_name = "ROI_" + str(resolution) + "Landscape"
-
-        run_raster = raster_tools.RasterData.from_file(
-            os.path.join("GeneratedData", landscape_name, "HostDensity.txt"))
-        run_raster_header = run_raster.header_vals
-        dimensions_agg = (run_raster_header['nrows'], run_raster_header['ncols'])
-        ncells_agg = np.prod(dimensions_agg)
-
-        infile = os.path.join(
-            "GeneratedData", "RasterFits",
-            config_dict['resolution_testing_options']['test_control_fits']['fit_results_file_name'])
-        with open(infile, "r") as fin:
-            all_fit_results = json.load(fin)
-
-        kernel_names = config_dict['resolution_testing_options']['kernel_names']
-        kernel_generators = []
-        for name in kernel_names:
-            if name == "Exponential":
-                kernel_generators.append(kernels.make_exponential_kernel)
-            elif name == "Cauchy":
-                kernel_generators.append(kernels.make_cauchy_kernel)
-            elif name == "ExpPower":
-                kernel_generators.append(kernels.make_exp_power_kernel)
-            else:
-                raise ValueError("Unknown kernel name!")
-
-        for budget in all_budgets:
-
-            # Make map to low resolution cells for intervention
-            sim_header = raster_tools.RasterData.from_file(
-                os.path.join("GeneratedData", "EROI_Landscape", "HostNumbers.txt")).header_vals
-            forward_map, reverse_map = raster_tools.aggregate_cells(
-                sim_header, run_raster_header, generate_reverse=True, ignore_outside_target=True)
-            # Run simulation data with intervention scheme (NSWE, at given run resolution)
-            data_path = os.path.join(
-                "GeneratedData", "SimulationRuns", config_dict['resolution_testing_options'][
-                    'test_control_fits']['simulation_stub'] + "_controlled")
-            add_options = config_dict[
-                'resolution_testing_options']['test_control_fits']['simulation_add_options']
-            if add_options is None:
-                add_options = {}
-            add_options["InterventionScripts"] = [NSWEIntervention.Intervention]
-            add_options["InterventionUpdateFrequencies"] = None
-            add_options["UpdateOnAllEvents"] = True
-            add_options["InterventionOptions"] = [(
-                budget, control_rate, forward_map, reverse_map)]
-            add_options["OutputFileStub"] = data_path
-
-            run_data = IndividualSimulator.main(
-                os.path.join("InputData", "REDW_config.ini"), params_options=add_options)
-
-            # Extract simulation data
-            base_data = output_data.create_cell_data(
-                data_path, target_header=base_raster_header, ignore_outside_raster=True)
-            sim_dpcs = np.zeros((len(base_data), len(test_times), ncells))
-            for i, dataset in enumerate(base_data):
-                for cell in range(ncells):
-                    current_i = None
-                    idx = 0
-                    for t, _, i_state, *_ in dataset[cell]:
-                        while t > test_times[idx]:
-                            sim_dpcs[i, idx, cell] = current_i
-                            idx += 1
-                            if idx > len(test_times):
-                                break
-                        current_i = i_state
-                    while idx != len(test_times):
-                        sim_dpcs[i, idx, cell] = current_i
-                        idx += 1
-
-            sim_land_dpcs = np.sum(sim_dpcs, axis=2)
-
-            aggregated_base_data = output_data.create_cell_data(
-                data_path, target_header=run_raster_header, ignore_outside_raster=True)
-            sim_agg_dpcs = np.zeros((len(aggregated_base_data), len(test_times), ncells_agg))
-            for i, dataset in enumerate(aggregated_base_data):
-                for cell in range(ncells_agg):
-                    current_i = None
-                    idx = 0
-                    for t, _, i_state, *_ in dataset[cell]:
-                        while t > test_times[idx]:
-                            sim_agg_dpcs[i, idx, cell] = current_i
-                            idx += 1
-                            if idx > len(test_times):
-                                break
-                        current_i = i_state
-                    while idx != len(test_times):
-                        sim_agg_dpcs[i, idx, cell] = current_i
-                        idx += 1
-
-            all_sim_data = {
-                "Divided": sim_dpcs,
-                "Normal": sim_agg_dpcs,
-                "Landscape": sim_land_dpcs
-            }
-
-            tested_fit = fit_test.TestedFit(
-                landscape_name, base_raster, run_raster, all_sim_data, test_times)
-
-            if n_short_time_qa_periods is not None:
-                tested_fit_short = fit_test.TestedFit(
-                    landscape_name, base_raster, run_raster, all_sim_data, test_times,
-                    coupled_runs=True)
-
-            for kernel_name, kernel_gen in zip(kernel_names, kernel_generators):
-
-                # Read parameter values
-                opt_params = all_fit_results[landscape_name][kernel_name]
-                opt_params.pop("Raw_Output", None)
-                opt_params.pop("Prior", None)
-                opt_params.pop("Initialisation", None)
-                primary_rate = opt_params.pop('PrimaryRate', 0.0)
-
-                print("Resolution: {0}, Kernel: {1}".format(resolution, kernel_name), opt_params)
-                print("PrimaryRate: {0}".format(primary_rate))
-
-                coupling = np.ones((ncells_agg, ncells_agg))
-                kernel = kernel_gen(**opt_params)
-
-                for i in range(ncells_agg):
-                    for j in range(ncells_agg):
-                        dx = abs((i % dimensions_agg[1]) - (j % dimensions_agg[1]))
-                        dy = abs(int(i/dimensions_agg[1]) - int(j/dimensions_agg[1]))
-                        dist = np.sqrt(dx*dx + dy*dy)
-                        coupling[i, j] = kernel(dist)
-
-                # times = np.linspace(0, 1000, 501)
-                max_hosts = int(100 * np.power(resolution / full_resolution, 2))
-
-                params = {
-                    'inf_rate': 1.0,
-                    'control_rate': control_rate,
-                    'max_budget_rate': budget,
-                    'coupling': coupling,
-                    'times': test_times,
-                    'max_hosts': max_hosts,
-                    'primary_rate': primary_rate
-                }
-
-                host_file = os.path.join("GeneratedData", landscape_name, "HostDensity.txt")
-                s_init_file = os.path.join("GeneratedData", landscape_name,
-                                           "InitialConditions_Density_S.txt")
-                i_init_file = os.path.join("GeneratedData", landscape_name,
-                                           "InitialConditions_Density_I.txt")
-
-                approx_model = raster_model.RasterModel(
-                    params, host_density_file=host_file, initial_s_file=s_init_file,
-                    initial_i_file=i_init_file)
-
-                # Calculate quality metrics with control
-                # Run policy on raster model (with control, prioritised by N->S, E->W)
-                control_scheme = NSWEIntervention.RasterControlScheme(ncells_agg, budget)
-                control_tmp = approx_model.run_scheme(control_scheme.control_scheme)
-                control_results = {}
-                for cell in range(ncells_agg):
-                    s_vals = control_tmp.results_s["Cell" + str(cell)].values
-                    i_vals = control_tmp.results_i["Cell" + str(cell)].values
-                    t_vals = control_tmp.results_s["time"].values
-                    control_results[cell] = np.column_stack((t_vals, s_vals, i_vals))
-                # Calculate quality metrics
-                control_metrics_tmp = calculate_metric(
-                    tested_fit, control_results, run_raster_header, base_raster_header,
-                    kernel_name, metric="RMSE")
-
-                if n_short_time_qa_periods is not None:
-                    run_short_qa(tested_fit_short, run_raster_header, base_raster_header,
-                                 kernel_name, landscape_name, approx_model, n_short_time_qa_periods,
-                                 control_scheme=control_scheme.control_scheme)
-
+        if control_stub is None:
+            tested_fit.save(os.path.join("GeneratedData", "ResolutionTesting",
+                                         landscape_name + "FitTest" + output_id + ".pickle"))
+        else:
             tested_fit.save(os.path.join(
-                "GeneratedData", "RasterFits", landscape_name + "ControlFitTest_Budget" +
-                str(budget) + "_" +
-                config_dict['resolution_testing_options']['test_control_fits']['output_id'] +
-                ".pickle"))
+                "GeneratedData", "ResolutionTesting", landscape_name + "FitTest" + output_id +
+                "_controlled.pickle"))
 
-            if n_short_time_qa_periods is not None:
-                tested_fit_short.save(os.path.join(
-                    "GeneratedData", "RasterFits", landscape_name + "ControlFitTest_Budget" +
-                    str(budget) + "_" +
-                    config_dict['resolution_testing_options']['test_control_fits']['output_id'] +
-                    "_ShortQA.pickle"))
+def rescale_control_rate(optimisation_stub, sim_stub, landscape_name, kernel_name):
+    """Rescale control rate using optimised model"""
 
+    file = "GeneratedData/ResolutionTesting/{}FitTest.pickle".format(landscape_name)
+    with open(file, "rb") as infile:
+        tested_fit = pickle.load(infile)
 
-def plot_fits(config_dict, test_resolutions, full_resolution):
-    """Plot fit assessments to test resolutions."""
+    optim = raster_model.RasterOptimisation(
+        output_file_stub=os.path.join(optimisation_stub, 'output'),
+        input_file_stub=optimisation_stub+'/')
 
-    time_qa_plots = config_dict['resolution_testing_options']['plot_fits']['time_qa_plots']
-    include_short_qa = config_dict[
-        'resolution_testing_options']['plot_fits']['include_short_time_qa']
+    approx_model = tested_fit.get_model(kernel_name)
 
-    save_path = os.path.join(
-        "Figures", "ResolutionTesting_" +
-        config_dict['resolution_testing_options']['plot_fits']['output_name'], "NoControl")
+    standard_control_rate = MainOptions.OPTIONS['control_rate']
 
-    os.makedirs(save_path, exist_ok=True)
+    file_path = os.path.join(sim_stub, "summaries", landscape_name + ".h5")
+    with h5py.File(file_path, 'r') as hf:
+        sim_dpcs = hf['sim_summary_I'][:]
 
-    kernel_names = config_dict['resolution_testing_options']['kernel_names']
+    thin_scheme = interp1d(optim.results_u['time'], optim.results_u.values[:, 1:].T,
+                           kind="zero", fill_value="extrapolate")
 
-    # Combine data
-    metric_scales = ["Divided", "Normal", "Landscape"]
-    all_data = {kernel: {metric: [] for metric in metric_scales} for kernel in kernel_names}
-    short_data = {kernel: {metric: [] for metric in metric_scales} for kernel in kernel_names}
-    for resolution in test_resolutions:
-        nhosts = int(100 * np.power(resolution / full_resolution, 2))
-        landscape_name = "ROI_" + str(resolution) + "Landscape"
-        file_name = os.path.join(
-            "GeneratedData", "RasterFits", landscape_name + "FitTest_" +
-            config_dict['resolution_testing_options']['plot_fits']['test_output_id'] +
-            ".pickle")
-        with open(file_name, "rb") as infile:
-            tested_fit = pickle.load(infile)
-        nhosts_land = (100 * tested_fit.base_raster.header_vals['nrows'] *
-                       tested_fit.base_raster.header_vals['ncols'])
+    rogue_scheme = interp1d(optim.results_v['time'], optim.results_v.values[:, 1:].T,
+                            kind="zero", fill_value="extrapolate")
 
-        if include_short_qa:
-            file_name = os.path.join(
-                "GeneratedData", "RasterFits", landscape_name + "FitTest_" +
-                config_dict['resolution_testing_options']['plot_fits']['test_output_id'] +
-                "_ShortQA.pickle")
-            with open(file_name, "rb") as infile:
-                tested_fit_short = pickle.load(infile)
+    times = tested_fit.test_times
+    ncells = sim_dpcs.shape[1]
 
-        for kernel in kernel_names:
-            all_data[kernel]["Divided"].append(
-                tested_fit.metric_data[kernel]["Divided"] / 100)
-            all_data[kernel]["Normal"].append(
-                tested_fit.metric_data[kernel]["Normal"] / nhosts)
-            all_data[kernel]["Landscape"].append(
-                tested_fit.metric_data[kernel]["Landscape"] / nhosts_land)
+    def min_func(factor):
+        """Function to minimise, SSE between sims and approx at aggregated scale."""
 
-            if include_short_qa:
-                short_data[kernel]["Divided"].append(
-                    tested_fit_short.metric_data[kernel]["Divided"] / 100)
-                short_data[kernel]["Normal"].append(
-                    tested_fit_short.metric_data[kernel]["Normal"] / nhosts)
-                short_data[kernel]["Landscape"].append(
-                    tested_fit_short.metric_data[kernel]["Landscape"] / nhosts_land)
+        approx_model.params['control_rate'] = factor[0] * standard_control_rate
+        controlled_tmp = approx_model.run_scheme(thin_scheme=thin_scheme, rogue_scheme=rogue_scheme)
 
-        if time_qa_plots:
-            test_times = tested_fit.test_times
-            time_data = tested_fit.time_data
-            if include_short_qa:
-                test_times_short = tested_fit_short.test_times
-                time_data_short = tested_fit_short.time_data
-            for metric in metric_scales:
-                if metric == "Divided":
-                    host_factor = 100
-                elif metric == "Normal":
-                    host_factor = nhosts
-                elif metric == "Landscape":
-                    host_factor = nhosts_land
-                else:
-                    raise ValueError("Unknown metric scale!")
+        controlled_results = np.zeros((ncells, len(times)))
+        for cell in range(ncells):
+            i_vals = controlled_tmp.results_i["Cell" + str(cell)].values
+            controlled_results[cell, :] = i_vals
 
-                fig = plt.figure()
-                ax = fig.add_subplot(111)
-                for i, kernel in enumerate(kernel_names):
-                    ax.plot(test_times, time_data[kernel][metric] / host_factor, '-',
-                            color="C{}".format(i), alpha=0.6, label=kernel)
-                    if include_short_qa:
-                        ax.plot(test_times_short, time_data_short[kernel][metric] / host_factor,
-                                '--', color="C{}".format(i), alpha=0.6)
-                ax.legend()
-                ax.set_title(metric + " Metric")
-                ax.set_xlabel("Time")
-                ax.set_ylabel("RMSE as Proportion of Cell")
-                fig.savefig(os.path.join(
-                    save_path, "ResolutionTesting_TimeQA_" + metric + "_" +
-                    config_dict['resolution_testing_options']['plot_fits']['output_name'] +
-                    "_" + str(resolution) + ".png"))
-                plt.close(fig)
+        sse = 0
+        for dataset in sim_dpcs:
+            sse += np.sum(np.square(controlled_results - dataset))
 
-    # Make plots for each kernel
-    for kernel in kernel_names:
-        fig = plt.figure()
-        ax = fig.add_subplot(111)
-        for i, metric in enumerate(metric_scales):
-            ax.plot(test_resolutions, all_data[kernel][metric], 'o-', alpha=0.6, label=metric,
-                    color="C{}".format(i))
-            if include_short_qa:
-                ax.plot(test_resolutions, short_data[kernel][metric], 'o--', alpha=0.6,
-                        color="C{}".format(i))
-        ax.legend()
-        ax.set_title(kernel + " Kernel")
-        ax.set_xlabel("Resolution / m")
-        ax.set_ylabel("RMSE as Proportion of Cell")
-        fig.savefig(os.path.join(
-            save_path, "ResolutionTesting_" + kernel + "_" +
-            config_dict['resolution_testing_options']['plot_fits']['output_name'] + ".png"))
-        plt.close(fig)
+        # rescale for better gradient calculation
+        sse = (sse - 130000000000) / 50000000000
 
-    # Make plots for each metric
-    for metric in metric_scales:
-        fig = plt.figure()
-        ax = fig.add_subplot(111)
-        for i, kernel in enumerate(kernel_names):
-            ax.plot(test_resolutions, all_data[kernel][metric], 'o-', alpha=0.6, label=kernel,
-                    color="C{}".format(i))
-            if include_short_qa:
-                ax.plot(test_resolutions, short_data[kernel][metric], 'o--', alpha=0.6,
-                        color="C{}".format(i))
-        ax.legend()
-        ax.set_title(metric + " Metric")
-        ax.set_xlabel("Resolution / m")
-        ax.set_ylabel("RMSE as Proportion of Cell")
-        fig.savefig(os.path.join(
-            save_path, "ResolutionTesting_" + metric + "_" +
-            config_dict['resolution_testing_options']['plot_fits']['output_name'] + ".png"))
-        plt.close(fig)
+        logging.info("For factor %s, SSE: %f", factor, sse)
+        return sse
 
-def plot_control_fits(config_dict, test_resolutions, full_resolution):
-    """Plot control fit assessments to test resolutions over control budget range."""
+    ret = minimize(min_func, [0.7], method='Nelder-Mead')
 
-    all_budgets = config_dict['resolution_testing_options']['plot_control_fits']['budgets']
-
-    time_qa_plots = config_dict['resolution_testing_options']['plot_control_fits']['time_qa_plots']
-    include_short_qa = config_dict[
-        'resolution_testing_options']['plot_control_fits']['include_short_time_qa']
-
-    save_path = os.path.join(
-        "Figures", "ResolutionTesting_" +
-        config_dict['resolution_testing_options']['plot_control_fits']['output_name'],
-        "WithControl")
-
-    os.makedirs(save_path, exist_ok=True)
-
-    kernel_names = config_dict['resolution_testing_options']['kernel_names']
-
-    # Combine data
-    metric_scales = ["Divided", "Normal", "Landscape"]
-    all_data = {kernel: {metric: {resolution: [] for resolution in test_resolutions}
-                         for metric in metric_scales} for kernel in kernel_names}
-    short_data = {kernel: {metric: {resolution: [] for resolution in test_resolutions}
-                           for metric in metric_scales} for kernel in kernel_names}
-    for resolution in test_resolutions:
-        nhosts = int(100 * np.power(resolution / full_resolution, 2))
-        landscape_name = "ROI_" + str(resolution) + "Landscape"
-
-        file_name = os.path.join(
-            "GeneratedData", "RasterFits", landscape_name + "FitTest_" +
-            config_dict['resolution_testing_options']['plot_control_fits']['test_output_id'] +
-            ".pickle")
-        with open(file_name, "rb") as infile:
-            tested_fit = pickle.load(infile)
-            nhosts_land = (100 * tested_fit.base_raster.header_vals['nrows'] *
-                           tested_fit.base_raster.header_vals['ncols'])
-
-        if include_short_qa:
-            file_name = os.path.join(
-                "GeneratedData", "RasterFits", landscape_name + "FitTest_" +
-                config_dict['resolution_testing_options']['plot_control_fits']['test_output_id'] +
-                "_ShortQA.pickle")
-            with open(file_name, "rb") as infile:
-                tested_fit_short = pickle.load(infile)
-
-        if time_qa_plots:
-            all_time_data = {kernel: {metric: [] for metric in metric_scales}
-                             for kernel in kernel_names}
-            all_test_times = {kernel: {metric: [] for metric in metric_scales}
-                              for kernel in kernel_names}
-            if include_short_qa:
-                all_time_data_short = {kernel: {metric: [] for metric in metric_scales}
-                                       for kernel in kernel_names}
-                all_test_times_short = {kernel: {metric: [] for metric in metric_scales}
-                                        for kernel in kernel_names}
-
-        for kernel in kernel_names:
-            all_data[kernel]["Divided"][resolution].append(
-                tested_fit.metric_data[kernel]["Divided"] / 100)
-            all_data[kernel]["Normal"][resolution].append(
-                tested_fit.metric_data[kernel]["Normal"] / nhosts)
-            all_data[kernel]["Landscape"][resolution].append(
-                tested_fit.metric_data[kernel]["Landscape"] / nhosts_land)
-
-            if include_short_qa:
-                short_data[kernel]["Divided"][resolution].append(
-                    tested_fit_short.metric_data[kernel]["Divided"] / 100)
-                short_data[kernel]["Normal"][resolution].append(
-                    tested_fit_short.metric_data[kernel]["Normal"] / nhosts)
-                short_data[kernel]["Landscape"][resolution].append(
-                    tested_fit_short.metric_data[kernel]["Landscape"] / nhosts_land)
-
-            if time_qa_plots:
-                test_times = tested_fit.test_times
-                time_data = tested_fit.time_data
-                if include_short_qa:
-                    test_times_short = tested_fit_short.test_times
-                    time_data_short = tested_fit_short.time_data
-                for metric in metric_scales:
-                    if metric == "Divided":
-                        host_factor = 100
-                    elif metric == "Normal":
-                        host_factor = nhosts
-                    elif metric == "Landscape":
-                        host_factor = nhosts_land
-                    else:
-                        raise ValueError("Unknown metric scale!")
-
-                    all_test_times[kernel][metric].append(test_times)
-                    all_time_data[kernel][metric].append(
-                        time_data[kernel][metric] / host_factor)
-                    if include_short_qa:
-                        all_test_times_short[kernel][metric].append(test_times_short)
-                        all_time_data_short[kernel][metric].append(
-                            time_data_short[kernel][metric] / host_factor)
-
-        for budget in all_budgets:
-            file_name = os.path.join(
-                "GeneratedData", "RasterFits", landscape_name + "ControlFitTest_Budget" +
-                str(budget) + "_" +
-                config_dict['resolution_testing_options']['plot_control_fits']['test_output_id'] +
-                ".pickle")
-            with open(file_name, "rb") as infile:
-                tested_fit = pickle.load(infile)
-            nhosts_land = (100 * tested_fit.base_raster.header_vals['nrows'] *
-                           tested_fit.base_raster.header_vals['ncols'])
-
-            if include_short_qa:
-                file_name = os.path.join(
-                    "GeneratedData", "RasterFits", landscape_name + "ControlFitTest_Budget" +
-                    str(budget) + "_" +
-                    config_dict['resolution_testing_options']['plot_control_fits']['test_output_id']
-                    + "_ShortQA.pickle")
-                with open(file_name, "rb") as infile:
-                    tested_fit_short = pickle.load(infile)
-
-            for kernel in kernel_names:
-                all_data[kernel]["Divided"][resolution].append(
-                    tested_fit.metric_data[kernel]["Divided"] / 100)
-                all_data[kernel]["Normal"][resolution].append(
-                    tested_fit.metric_data[kernel]["Normal"] / nhosts)
-                all_data[kernel]["Landscape"][resolution].append(
-                    tested_fit.metric_data[kernel]["Landscape"] / nhosts_land)
-
-                if include_short_qa:
-                    short_data[kernel]["Divided"][resolution].append(
-                        tested_fit_short.metric_data[kernel]["Divided"] / 100)
-                    short_data[kernel]["Normal"][resolution].append(
-                        tested_fit_short.metric_data[kernel]["Normal"] / nhosts)
-                    short_data[kernel]["Landscape"][resolution].append(
-                        tested_fit_short.metric_data[kernel]["Landscape"] / nhosts_land)
-
-                if time_qa_plots:
-                    test_times = tested_fit.test_times
-                    time_data = tested_fit.time_data
-                    if include_short_qa:
-                        test_times_short = tested_fit_short.test_times
-                        time_data_short = tested_fit_short.time_data
-                    for metric in metric_scales:
-                        if metric == "Divided":
-                            host_factor = 100
-                        elif metric == "Normal":
-                            host_factor = nhosts
-                        elif metric == "Landscape":
-                            host_factor = nhosts_land
-                        else:
-                            raise ValueError("Unknown metric scale!")
-
-                        all_test_times[kernel][metric].append(test_times)
-                        all_time_data[kernel][metric].append(
-                            time_data[kernel][metric] / host_factor)
-                        if include_short_qa:
-                            all_test_times_short[kernel][metric].append(test_times_short)
-                            all_time_data_short[kernel][metric].append(
-                                time_data_short[kernel][metric] / host_factor)
-
-        if time_qa_plots:
-            jet = plt.get_cmap('viridis')
-            cNorm = mpl.colors.Normalize(vmin=0, vmax=max(all_budgets))
-            scalarMap = mpl.cm.ScalarMappable(norm=cNorm, cmap=jet)
-            for metric in metric_scales:
-                fig = plt.figure()
-                ax = fig.add_subplot(111)
-                kernel = "Exponential"
-                ax.plot(all_test_times[kernel][metric][0], all_time_data[kernel][metric][0], '-',
-                        color=scalarMap.to_rgba(0), alpha=0.6, label="Budget={}".format(0))
-                if include_short_qa:
-                    ax.plot(all_test_times_short[kernel][metric][0],
-                            all_time_data_short[kernel][metric][0], '--',
-                            color=scalarMap.to_rgba(0), alpha=0.6)
-                for i, budget in enumerate(all_budgets):
-                    ax.plot(all_test_times[kernel][metric][i+1], all_time_data[kernel][metric][i+1],
-                            '-', color=scalarMap.to_rgba(all_budgets[i]), alpha=0.6,
-                            label="Budget={}".format(budget))
-                    if include_short_qa:
-                        ax.plot(all_test_times_short[kernel][metric][i+1],
-                                all_time_data_short[kernel][metric][i+1], '--',
-                                color=scalarMap.to_rgba(all_budgets[i]), alpha=0.6)
-                ax.legend()
-                ax.set_title(metric + " Metric")
-                ax.set_xlabel("Time")
-                ax.set_ylabel("RMSE as Proportion of Cell")
-                fig.tight_layout()
-                fig.savefig(os.path.join(
-                    save_path, "ResolutionTesting_TimeQA_" + metric + "_" +
-                    config_dict['resolution_testing_options']['plot_control_fits']['output_name'] +
-                    "_" + str(resolution) + ".png"))
-                plt.close(fig)
-
-    all_budgets.insert(0, 0)
-
-    # Make plots for each metric
-    for resolution in test_resolutions:
-        fig = plt.figure()
-        ax = fig.add_subplot(111)
-        kernel = "Exponential"
-        for i, metric in enumerate(metric_scales):
-            ax.plot(all_budgets, all_data[kernel][metric][resolution], 'o-', alpha=0.6,
-                    label=metric, color="C{}".format(i))
-            if include_short_qa:
-                ax.plot(all_budgets, short_data[kernel][metric][resolution], 'o--', alpha=0.6,
-                        color="C{}".format(i))
-        ax.legend()
-        ax.set_title("Resolution: " + str(resolution))
-        ax.set_xlabel("Budget")
-        ax.set_ylabel("RMSE as Proportion of Cell")
-        fig.tight_layout()
-        fig.savefig(os.path.join(
-            save_path, "ResolutionTesting_" + str(resolution) + "_" +
-            config_dict['resolution_testing_options']['plot_control_fits']['output_name'] + ".png"))
-        plt.close(fig)
-
-
-def plot_likelihood(landscape_name, name, gen, opt_params, lik_loaded, config_dict, prior):
-    """Generate plots of likelihood surfaces."""
-
-    recalc_plot_vals = config_dict[
-        'resolution_testing_options']['fit_landscapes']['recalculate_plot_values']
-
-    all_params = {}
-    param_names = []
-    for param, value in opt_params.items():
-        if param in ["Raw_Output", "Prior", "Initialisation"]:
-            continue
-        elif param == "beta":
-            all_params[param] = np.logspace(-8, np.log10(prior[param][1]), 100)
-        else:
-            all_params[param] = np.linspace(*prior[param], 100)
-        param_names.append(param)
-    param_names.sort()
-
-    if len(param_names) == 2:
-        if recalc_plot_vals:
-
-            all_meshed = np.meshgrid(*[all_params[param] for param in param_names])
-
-            loglik = np.zeros_like(all_meshed[0])
-            for i in range(all_meshed[0].shape[0]):
-                for j in range(all_meshed[0].shape[1]):
-                    param_values = {
-                        param: all_meshed[k][i, j] for k, param in enumerate(param_names)}
-                    loglik[i, j] = lik_loaded.eval_loglik(gen(**param_values))[0]
-
-            filename = os.path.join("GeneratedData", "RasterFits",
-                                    landscape_name + name + "LikMapValues")
-            np.savez(filename, loglik=loglik,
-                     **{param: all_meshed[k] for k, param in enumerate(param_names)})
-
-        else:
-            filename = os.path.join("GeneratedData", "RasterFits",
-                                    landscape_name + name + "LikMapValues.npz")
-            value_dict = np.load(filename)
-            loglik = value_dict['loglik']
-            all_meshed = [value_dict[param] for param in param_names]
-
-        cmap, cnorm = _map_loglik(loglik, config_dict)
-
-        fig = plt.figure()
-        ax = fig.add_subplot(111)
-        mesh = ax.pcolormesh(*all_meshed, loglik, cmap=cmap, norm=cnorm)
-        ax.plot(*[opt_params[param] for param in param_names], "x")
-        ax.set_xlabel(param_names[0])
-        ax.set_ylabel(param_names[1])
-        if param_names[0] == "beta":
-            ax.set_xscale("log")
-        elif param_names[1] == "beta":
-            ax.set_yscale("log")
-        fig.colorbar(mesh, ax=ax)
-        fig.savefig(os.path.join("Figures", landscape_name + name + "LikMap.png"))
-
-    if len(param_names) == 3:
-        for fixed_param_name in param_names:
-            unfixed_param_names = [x for x in param_names if x != fixed_param_name]
-
-            if recalc_plot_vals:
-                all_meshed = np.meshgrid(*[all_params[param] for param in unfixed_param_names])
-
-                loglik = np.zeros_like(all_meshed[0])
-                for i in range(all_meshed[0].shape[0]):
-                    for j in range(all_meshed[0].shape[1]):
-                        param_values = {param: all_meshed[k][i, j]
-                                        for k, param in enumerate(unfixed_param_names)}
-                        param_values[fixed_param_name] = opt_params[fixed_param_name]
-                        loglik[i, j] = lik_loaded.eval_loglik(gen(**param_values))[0]
-
-                filename = os.path.join("GeneratedData", "RasterFits", landscape_name + name +
-                                        "LikMap_" + fixed_param_name + "Values")
-                np.savez(filename, loglik=loglik,
-                         **{param: all_meshed[k] for k, param in enumerate(unfixed_param_names)})
-
-            else:
-                filename = os.path.join("GeneratedData", "RasterFits", landscape_name + name +
-                                        "LikMap_" + fixed_param_name + "Values.npz")
-                value_dict = np.load(filename)
-                loglik = value_dict['loglik']
-                all_meshed = [value_dict[param] for param in unfixed_param_names]
-
-            cmap, cnorm = _map_loglik(loglik, config_dict)
-
-            fig = plt.figure()
-            ax = fig.add_subplot(111)
-            mesh = ax.pcolormesh(*all_meshed, loglik, cmap=cmap, norm=cnorm)
-            ax.plot(*[opt_params[param] for param in unfixed_param_names], "x")
-            ax.set_xlabel(unfixed_param_names[0])
-            ax.set_ylabel(unfixed_param_names[1])
-            if unfixed_param_names[0] == "beta":
-                ax.set_xscale("log")
-            elif unfixed_param_names[1] == "beta":
-                ax.set_yscale("log")
-            fig.colorbar(mesh, ax=ax)
-            fig.savefig(os.path.join(
-                "Figures", landscape_name + name + "LikMap_" + fixed_param_name + ".png"))
-
-def _map_loglik(loglik, config_dict):
-
-    loglik = np.ma.masked_invalid(loglik)
-
-    vmin = np.min(loglik)
-    vmax = np.max(loglik)
-    print(vmin, vmax)
-    linthresh = config_dict['resolution_testing_options']['fit_landscapes']['plot_linthresh']
-    linscale = ((np.log10(np.abs(vmax)) - np.log10(linthresh)) +
-                (np.log10(np.abs(vmin)) - np.log10(linthresh))) / 18
-
-    norm = mpl.colors.SymLogNorm(linthresh=linthresh, linscale=linscale, vmin=vmin, vmax=vmax)
-    thresh_neg = norm(-linthresh)
-    thresh_pos = norm(linthresh)
-
-    colors1 = plt.cm.get_cmap("RdBu_r")(np.linspace(0, 0.5, 128))
-    colors1 = list(zip(np.linspace(0, thresh_neg, 128), colors1))
-    colors2 = plt.cm.get_cmap("RdBu_r")(np.linspace(0.5, 1, 128))
-    colors2 = list(zip(np.linspace(thresh_pos, 1.0, 128), colors2))
-    colors1 += [(thresh_neg, plt.cm.get_cmap("RdBu_r")(0.5)),
-                (thresh_pos, plt.cm.get_cmap("RdBu_r")(0.5))]
-    colors1 += colors2
-    cmap = mpl.colors.LinearSegmentedColormap.from_list('mycmap', colors1)
-
-    return cmap, norm
-
-def calculate_metric(tested_fit, run_data, run_raster_header, base_raster_header, kernel_name,
-                     metric="RMSE", couple_runs=False):
-    """Calculate fit quality metric for run_data, using base_data as simulation comparison."""
-
-    # TODO change format to use ndarray instead.
-
-    if not couple_runs:
-        run_data = [run_data] * tested_fit.sim_data["Normal"].shape[0]
-    run_data_div = []
-    run_data_total = []
-
-    for coupled_run in run_data:
-
-        run_data_div.append({})
-
-        run_data_total.append(np.zeros_like(coupled_run[0]))
-        run_data_total[-1][:, 0] = coupled_run[0][:, 0]
-
-        forward_map, back_map = raster_tools.aggregate_cells(
-            base_raster_header, run_raster_header, generate_reverse=True,
-            ignore_outside_target=True)
-        n_cells = np.power(run_raster_header['cellsize']/base_raster_header['cellsize'], 2)
-
-        for agg_cell, run in coupled_run.items():
-            cells = back_map[agg_cell]
-            for cell in cells:
-                run_data_div[-1][cell] = np.column_stack((
-                    run[:, 0],
-                    np.divide(run[:, 1], n_cells),
-                    np.divide(run[:, 2], n_cells)))
-
-                run_data_total[-1][:, 1] += np.divide(run[:, 1], n_cells)
-                run_data_total[-1][:, 2] += np.divide(run[:, 2], n_cells)
-
-        if not couple_runs:
-            run_data_div = run_data_div * tested_fit.sim_data["Normal"].shape[0]
-            run_data_total = run_data_total * tested_fit.sim_data["Normal"].shape[0]
-            break
-
-    all_run_data = {
-        "Divided": run_data_div,
-        "Normal": run_data,
-        "Landscape": run_data_total
+    # Write scaling results to file
+    results = {
+        'control_rate_factor': ret.x[0],
+        'Raw_Output': ret.__repr__()
     }
+    file = os.path.join("GeneratedData", "ResolutionTesting", 'scaling_results.json')
+    with open(file, "w") as outfile:
+        json.dump(results, outfile, indent=4)
 
-    if metric == "RMSE":
-        metric_vals, cell_data, time_data = calculate_rmse(
-            tested_fit, all_run_data, run_raster_header, time_data=True, verbose=False)
-    else:
-        raise ValueError("Metric not recognised!")
+def calculate_metric(sim_data, model_data, agg_header, base_header):
+    """Calculate RMSE metrics for at landscape, divided and normal scales."""
 
-    if not couple_runs:
-        all_run_data = {
-            "Divided": run_data_div[0],
-            "Normal": run_data[0],
-            "Landscape": run_data_total[0]
-        }
+    cell_data = {}
+    metric_vals = {}
+    time_data = {}
 
-    tested_fit.add_kernel(kernel_name, all_run_data, cell_data, metric_vals, time_data)
+    norm = sim_data['Normal'].shape[0] * sim_data['Normal'].shape[2]
+    agg_dims = (agg_header['nrows'], agg_header['ncols'])
+    div_dims = (base_header['nrows'], base_header['ncols'])
 
-    return metric_vals
+    # Aggregated scale
+    errors = sim_data['Normal'] - model_data
+    cell_data['Normal'] = np.sqrt(
+        np.square(errors).sum(axis=0).sum(axis=1) / norm).reshape(agg_dims)
+    metric_vals['Normal'] = np.sqrt(np.mean(np.square(errors)))
+    time_data['Normal'] = np.sqrt(np.mean(np.square(errors), axis=(0, 1)))
 
-def calculate_rmse(tested_fit, all_run_data, run_raster_header, time_data=False, verbose=True):
-    """Calculate RMSE metrics at divided, normal and whole landscape scales."""
+    # Landscape scale
+    errors = sim_data['Landscape'] - np.sum(model_data, axis=0)
+    metric_vals['Landscape'] = np.sqrt(np.mean(np.square(errors)))
+    time_data['Landscape'] = np.sqrt(np.mean(np.square(errors), axis=0))
 
-    test_times = tested_fit.test_times
+    # Divided scale
+    # Make mapping to aggregate full resolution simulaton cells
+    agg_map = raster_tools.aggregate_cells(base_header, agg_header, generate_reverse=False,
+                                           ignore_outside_target=True)
+    ncells = np.power(agg_header['cellsize'] / base_header['cellsize'], 2)
 
-    nRuns = tested_fit.sim_data["Normal"].shape[0]
+    # Construct model data at divided scale
+    model_div_data = np.zeros((sim_data['Divided'].shape[1], sim_data['Divided'].shape[2]))
+    for div_cell in range(sim_data['Divided'].shape[1]):
+        agg_cell = agg_map[div_cell]
+        model_div_data[div_cell] = model_data[agg_cell] / ncells
 
-    run_data_div = all_run_data['Divided']
-    run_data = all_run_data['Normal']
-    run_data_landscape = all_run_data['Landscape']
+    # Find metrics
+    norm = sim_data['Divided'].shape[0] * sim_data['Divided'].shape[2]
+    errors = sim_data['Divided'] - model_div_data
+    cell_data['Divided'] = np.sqrt(
+        np.square(errors).sum(axis=0).sum(axis=1) / norm).reshape(div_dims)
+    metric_vals['Divided'] = np.sqrt(np.mean(np.square(errors)))
+    time_data['Divided'] = np.sqrt(np.mean(np.square(errors), axis=(0, 1)))
 
-    nrows = run_raster_header['nrows']
-    ncols = run_raster_header['ncols']
-    nCells = nrows * ncols
+    return metric_vals, cell_data, time_data
 
-    # Find correct time points in run_data
-    all_times = run_data[0][0][:, 0]
-    time_idxs = np.nonzero([x in test_times for x in all_times])[0]
-    # TODO raise error if a test time is not included
+def run_no_control(sim_stub, append=False):
+    """Run resolution testing (no control) - landscape generation, fitting, test fits."""
 
-    sse = {i: 0 for i in range(nCells)}
+    os.makedirs("GeneratedData/ResolutionTesting", exist_ok=True)
 
-    if time_data:
-        time_sses = np.zeros(len(time_idxs))
-        time_sses_div = np.zeros(len(time_idxs))
-        time_sses_land = np.zeros(len(time_idxs))
+    # Set up logs
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    # create file handler which logs info messages
+    fh = logging.FileHandler(os.path.join("GeneratedData", "ResolutionTesting", 'res_testing.log'))
+    fh.setLevel(logging.INFO)
+    # create console handler with a higher log level
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.WARNING)
+    # create formatter and add it to the handlers
+    formatter = logging.Formatter(
+        '%(levelname)s | %(asctime)s | %(name)s:%(module)s:%(lineno)d | %(message)s')
+    ch.setFormatter(formatter)
+    fh.setFormatter(formatter)
+    # add the handlers to logger
+    logger.addHandler(ch)
+    logger.addHandler(fh)
 
-    # Aggregated rmse
-    for (i, dataset), coupled_run in zip(enumerate(tested_fit.sim_data["Normal"]), run_data):
-        for cell in range(nCells):
-            # Find sum square error in each cell
-            errors = [dataset[j, cell] - coupled_run[cell][idx, 2]
-                      for j, idx in enumerate(time_idxs)]
-            if time_data:
-                time_sses += np.square(errors)
-            sse_tmp = np.sum(np.square(errors))
-            sse[cell] += sse_tmp
+    logging.info("Starting no_control analysis with sim_stub: %s", sim_stub)
 
-        if verbose:
-            print("Run {0} complete.".format(i))
+    logging.info("Options used: %s", OPTIONS)
 
-    cell_rmses = [np.sqrt(sse[i] / (len(test_times)*nRuns)) for i in range(nCells)]
-    cell_rmses = np.reshape(cell_rmses, (nrows, ncols))
+    make_landscapes(OPTIONS['test_resolutions'], MainOptions.OPTIONS['roi'])
 
-    agg_rmse = np.sqrt(np.sum([sse[i] for i in range(nCells)]) / (len(time_idxs)*nCells*nRuns))
+    fit_landscapes(
+        out_file=os.path.join("GeneratedData", "ResolutionTesting", "FitResults.json"),
+        config_dict=None, test_resolutions=OPTIONS['test_resolutions'], full_resolution=250,
+        sim_stub=sim_stub, append=append)
 
-    if time_data:
-        time_sses = np.sqrt(time_sses / (nRuns*nCells))
+    test_fits(
+        sim_stub=sim_stub,
+        fit_results_file=os.path.join("GeneratedData", "ResolutionTesting", "FitResults.json"))
 
-    # Divided rmse
-    nCells_div = tested_fit.sim_data["Divided"][0].shape[1]
-    nrows_div = tested_fit.base_raster.header_vals['nrows']
-    ncols_div = tested_fit.base_raster.header_vals['ncols']
+    logging.info("Analysis completed")
 
-    sse = {i: 0 for i in range(nCells_div)}
+def run_with_control(sim_stub, control_stub):
+    """Run resolution testing (with control) - test fits unser non-spatial strategy."""
 
-    div_rmse = None
-    cell_rmses_div = None
-    for (i, dataset), coupled_run in zip(enumerate(tested_fit.sim_data["Divided"]), run_data_div):
-        for cell in range(nCells_div):
-            # Find sum square error in each cell
-            errors = [dataset[j, cell] - coupled_run[cell][idx, 2]
-                      for j, idx in enumerate(time_idxs)]
-            if time_data:
-                time_sses_div += np.square(errors)
-            sse_tmp = np.sum(np.square(errors))
-            sse[cell] += sse_tmp
+    os.makedirs("GeneratedData/ResolutionTesting", exist_ok=True)
 
-        if verbose:
-            print("Run {0} complete.".format(i))
+    # Set up logs
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    # create file handler which logs info messages
+    fh = logging.FileHandler(os.path.join("GeneratedData", "ResolutionTesting", 'res_testing.log'))
+    fh.setLevel(logging.INFO)
+    # create console handler with a higher log level
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.WARNING)
+    # create formatter and add it to the handlers
+    formatter = logging.Formatter(
+        '%(levelname)s | %(asctime)s | %(name)s:%(module)s:%(lineno)d | %(message)s')
+    ch.setFormatter(formatter)
+    fh.setFormatter(formatter)
+    # add the handlers to logger
+    logger.addHandler(ch)
+    logger.addHandler(fh)
 
-    cell_rmses_div = [np.sqrt(sse[i] / (len(test_times)*nRuns)) for i in range(nCells_div)]
-    cell_rmses_div = np.reshape(cell_rmses_div, (nrows_div, ncols_div))
+    logging.info("Starting with_control analysis with sim_stub: %s, and control_stub: %s",
+                 sim_stub, control_stub)
 
-    div_rmse = np.sqrt(np.sum([sse[i] for i in range(nCells_div)]) / (
-        len(time_idxs)*nCells_div*nRuns))
+    logging.info("Options used: %s", OPTIONS)
 
-    if time_data:
-        time_sses_div = np.sqrt(time_sses_div / (nRuns*nCells_div))
+    test_fits(
+        sim_stub=sim_stub,
+        fit_results_file=os.path.join("GeneratedData", "ResolutionTesting", "FitResults.json"),
+        control_stub=control_stub)
 
-    # Landscape rmse
-    errors = [[tested_fit.sim_data["Landscape"][i, j] - run_data_landscape[i][idx, 2]
-               for j, idx in enumerate(time_idxs)] for i in range(nRuns)]
-    if time_data:
-        time_sses_land = np.sqrt(np.sum(np.square(errors), axis=0) / nRuns)
-    total_rmse = np.sqrt(np.sum(np.square(errors)) / (len(time_idxs)*nRuns))
+    logging.info("Analysis completed")
 
-    metric_data = {
-        "Divided": div_rmse,
-        "Normal": agg_rmse,
-        "Landscape": total_rmse
-    }
 
-    cell_data = {
-        "Divided": cell_rmses_div,
-        "Normal": cell_rmses
-    }
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("sim_stub", help="Stub to simulation output folder.")
+    parser.add_argument("-a", "--append", action="store_true",
+                        help="Append to existing fit results file")
 
-    if time_data:
-        time_data = {
-            "Divided": time_sses_div,
-            "Normal": time_sses,
-            "Landscape": time_sses_land
-        }
+    args = parser.parse_args()
 
-        return metric_data, cell_data, time_data
+    os.makedirs("GeneratedData/ResolutionTesting", exist_ok=True)
 
-    return metric_data, cell_data
+    # Set up logs
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    # create file handler which logs info messages
+    fh = logging.FileHandler(os.path.join("GeneratedData", "ResolutionTesting", 'res_testing.log'))
+    fh.setLevel(logging.INFO)
+    # create console handler with a higher log level
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.WARNING)
+    # create formatter and add it to the handlers
+    formatter = logging.Formatter(
+        '%(levelname)s | %(asctime)s | %(name)s:%(module)s:%(lineno)d | %(message)s')
+    ch.setFormatter(formatter)
+    fh.setFormatter(formatter)
+    # add the handlers to logger
+    logger.addHandler(ch)
+    logger.addHandler(fh)
 
-def run_short_qa(tested_fit, run_raster_header, base_raster_header, kernel_name, landscape_name,
-                 approx_model, n_periods, control_scheme=None):
-    """Calculate metrics for short time period quality analysis"""
+    logging.info("Starting script with args: %r", args)
 
-    if control_scheme is None:
-        control_scheme = approx_model.no_control_policy
+    logging.info("Options used: %s", OPTIONS)
 
-    all_test_times = np.array_split(tested_fit.test_times, n_periods)
-    start_idxs = [x[0] for x in np.array_split(range(len(tested_fit.test_times)), n_periods)]
+    make_landscapes(OPTIONS['test_resolutions'], MainOptions.OPTIONS['roi'])
 
-    nsims = len(tested_fit.sim_data["Normal"])
+    fit_landscapes(
+        out_file=os.path.join("GeneratedData", "ResolutionTesting", "FitResults.json"),
+        config_dict=None, test_resolutions=OPTIONS['test_resolutions'], full_resolution=250,
+        sim_stub=args.sim_stub, append=args.append)
 
-    host_density_file = os.path.join("GeneratedData", landscape_name, "HostDensity.txt")
-    initial_s_file = os.path.join("GeneratedData", landscape_name,
-                                  "InitialConditions_Density_ShortTime_S.txt")
-    initial_i_file = os.path.join("GeneratedData", landscape_name,
-                                  "InitialConditions_Density_ShortTime_I.txt")
+    test_fits(
+        sim_stub=args.sim_stub,
+        fit_results_file=os.path.join("GeneratedData", "ResolutionTesting", "FitResults.json"))
 
-    host_raster = raster_tools.RasterData.from_file(host_density_file)
+    test_fits(
+        sim_stub=args.sim_stub,
+        fit_results_file=os.path.join("GeneratedData", "ResolutionTesting", "FitResults.json"),
+        control_stub=os.path.join("GeneratedData", "Total_non_spatial", "output"))
 
-    raster_size = (run_raster_header['nrows'], run_raster_header['ncols'])
-    raster_llcorner = (run_raster_header['xllcorner'], run_raster_header['yllcorner'])
-    cellsize = run_raster_header['cellsize']
-    initial_s_raster = raster_tools.RasterData(raster_size, raster_llcorner, cellsize)
-    initial_i_raster = raster_tools.RasterData(raster_size, raster_llcorner, cellsize)
-
-    all_run_data = [{cell: np.empty((0, 3)) for cell in range(np.prod(raster_size))}
-                    for _ in range(nsims)]
-
-    for start_idx, test_times in zip(start_idxs, all_test_times):
-        approx_model.params['times'] = test_times
-        for sim_num, sim_data in enumerate(tested_fit.sim_data["Normal"]):
-
-            for i in range(raster_size[0]):
-                for j in range(raster_size[1]):
-                    cell_id = j + raster_size[1]*i
-                    cell_num_i = sim_data[start_idx, cell_id] / (
-                        host_raster.array[i, j]*approx_model.params['max_hosts'])
-                    initial_i_raster.array[i, j] = cell_num_i
-                    initial_s_raster.array[i, j] = 1-initial_i_raster.array[i, j]
-
-            initial_s_raster.to_file(initial_s_file)
-            initial_i_raster.to_file(initial_i_file)
-            approx_model.set_init_state(host_density_file, initial_s_file, initial_i_file)
-
-            no_control_tmp = approx_model.run_scheme(control_scheme)
-            for cell in range(np.prod(raster_size)):
-                s_vals = no_control_tmp.results_s["Cell" + str(cell)].values
-                i_vals = no_control_tmp.results_i["Cell" + str(cell)].values
-                t_vals = no_control_tmp.results_s["time"].values
-                all_run_data[sim_num][cell] = np.vstack((
-                    all_run_data[sim_num][cell],
-                    np.column_stack((t_vals, s_vals, i_vals))))
-
-    os.remove(initial_s_file)
-    os.remove(initial_i_file)
-
-    return calculate_metric(tested_fit, all_run_data, run_raster_header, base_raster_header,
-                            kernel_name, couple_runs=True)
+    logging.info("Script completed")
