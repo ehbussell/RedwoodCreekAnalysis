@@ -5,7 +5,7 @@ Code for analysing invasion of sudden oak death into Redwood National Park in Ca
 ## Requirements
 This project relies on code from [SpatialSimulator](https://github.com/ehbussell/SpatialSimulator) repo, and [RasterModel](https://github.com/ehbussell/ODERasterModel) repo. Optimisation in the raster model also requires [Ipopt](https://github.com/coin-or/Ipopt).
 
-Other data is required in InputData directory - most importantly host density file, weather data and forest type map from Meentemeyer *et al/.* (2011). These are currently unavailable.
+Other data is required in InputData directory - most importantly host density file, weather data and forest type map from Meentemeyer *et al.* (2011). These are currently unavailable.
 
 ## Overall analysis approach
 
